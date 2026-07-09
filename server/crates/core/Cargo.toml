@@ -12,3 +12,13 @@ serde.workspace = true
 thiserror.workspace = true
 
 sqlx.workspace = true
+
+tokio.workspace = true
+async-trait.workspace = true
+secrecy.workspace = true
+
+infer.workspace = true
+image.workspace = true
+
+aws-sdk-s3.workspace = true
+aws-config.workspace = true
