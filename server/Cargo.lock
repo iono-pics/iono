@@ -1030,7 +1030,11 @@ dependencies = [
 name = "iono-core"
 version = "0.1.0"
 dependencies = [
+ "actix-web",
  "serde",
+ "sqlx",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]

@@ -8,3 +8,10 @@ workspace = true
 
 [dependencies]
 serde.workspace = true
+
+thiserror.workspace = true
+
+sqlx.workspace = true
+
+actix-web.workspace = true
+tracing.workspace = true
