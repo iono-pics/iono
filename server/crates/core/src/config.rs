@@ -17,6 +17,8 @@ pub struct Config {
     pub s3_access_key_id: String,
     pub s3_secret_access_key: SecretString,
     pub s3_public_url_base: Option<String>,
+
+    pub max_upload_size_bytes: usize,
 }
 
 impl Config {
@@ -30,10 +32,7 @@ impl Config {
                 .parse()
                 .expect("INGEST_PORT malformed"),
 
-            database_url: env_secret_or(
-                "DATABASE_URL",
-                "postgres://iono:iono@localhost:5432/iono",
-            ),
+            database_url: env_secret_or("DATABASE_URL", "postgres://iono:iono@localhost:5432/iono"),
             database_max_connections: env_or("DATABASE_MAX_CONNECTIONS", "10")
                 .parse()
                 .expect("DATABASE_MAX_CONNECTIONS malformed"),
@@ -46,6 +45,12 @@ impl Config {
             s3_public_url_base: env::var("S3_PUBLIC_URL_BASE")
                 .ok()
                 .filter(|s| !s.is_empty()),
+
+            max_upload_size_bytes: env_or("MAX_UPLOAD_SIZE_MB", "10240")
+                .parse::<usize>()
+                .expect("MAX_UPLOAD_SIZE_MB malformed")
+                * 1024
+                * 1024,
         }
     }
 }
