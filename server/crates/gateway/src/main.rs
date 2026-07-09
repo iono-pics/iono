@@ -1,9 +1,12 @@
-use actix_web::{App, HttpServer};
+use actix_web::{web, App, HttpServer};
 use tracing_actix_web::TracingLogger;
 
-use iono_core::Config;
+use iono_core::{db, Config};
 
 mod error;
+mod state;
+
+use state::AppState;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -14,16 +17,23 @@ async fn main() -> std::io::Result<()> {
 
     let config = Config::from_env();
 
-    tracing::info!(
-        "{}",
-        format!(
-            "iono-gateway listening on http://{}:{}",
-            config.host, config.gateway_port
-        )
-    );
-
-    HttpServer::new(|| App::new().wrap(TracingLogger::default()))
-        .bind((config.host, config.gateway_port))?
-        .run()
+    let db = db::build(&config)
         .await
+        .expect("failed to connect to database");
+
+    let host = config.host.clone();
+    let port = config.gateway_port;
+
+    tracing::info!("iono-gateway listening on http://{}:{}", host, port);
+
+    let state = web::Data::new(AppState { db, config });
+
+    HttpServer::new(move || {
+        App::new()
+            .wrap(TracingLogger::default())
+            .app_data(state.clone())
+    })
+    .bind((host, port))?
+    .run()
+    .await
 }

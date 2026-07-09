@@ -8,6 +8,9 @@ pub struct Config {
     pub gateway_port: u16,
     pub ingest_port: u16,
 
+    pub database_url: SecretString,
+    pub database_max_connections: u32,
+
     pub s3_bucket: String,
     pub s3_region: String,
     pub s3_endpoint: Option<String>,
@@ -26,6 +29,14 @@ impl Config {
             ingest_port: env_or("INGEST_PORT", "8081")
                 .parse()
                 .expect("INGEST_PORT malformed"),
+
+            database_url: env_secret_or(
+                "DATABASE_URL",
+                "postgres://iono:iono@localhost:5432/iono",
+            ),
+            database_max_connections: env_or("DATABASE_MAX_CONNECTIONS", "10")
+                .parse()
+                .expect("DATABASE_MAX_CONNECTIONS malformed"),
 
             s3_bucket: env_or("S3_BUCKET", "iono-uploads"),
             s3_region: env_or("S3_REGION", "auto"),
