@@ -1,0 +1,11 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "iono-web",
+	"main": "../../web/.svelte-kit/cloudflare/_worker.js",
+	"compatibility_date": "2026-07-09",
+	"compatibility_flags": ["nodejs_als"],
+	"assets": {
+		"binding": "ASSETS",
+		"directory": "../../web/.svelte-kit/cloudflare"
+	}
+}

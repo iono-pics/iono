@@ -1,0 +1,28 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "iono-server",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-07-09",
+	"compatibility_flags": ["nodejs_compat"],
+	"containers": [
+		{
+			"class_name": "ServerContainer",
+			"image": "../../server/Dockerfile",
+			"max_instances": 10
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"class_name": "ServerContainer",
+				"name": "SERVER_CONTAINER"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"new_sqlite_classes": ["ServerContainer"],
+			"tag": "v1"
+		}
+	]
+}

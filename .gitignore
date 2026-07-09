@@ -4,3 +4,8 @@
 
 # macOS
 .DS_Store
+
+# Yarn
+node_modules/
+**/.yarn/install-state.gz
+**/.pnp.*
