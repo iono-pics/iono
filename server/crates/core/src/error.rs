@@ -1,4 +1,3 @@
-use actix_web::{http::StatusCode, HttpResponse, ResponseError};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -49,27 +48,3 @@ impl AppError {
 }
 
 pub type AppResult<T> = Result<T, AppError>;
-
-impl ResponseError for AppError {
-    fn status_code(&self) -> StatusCode {
-        match self {
-            AppError::NotFound => StatusCode::NOT_FOUND,
-            AppError::Unauthorized => StatusCode::UNAUTHORIZED,
-            AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
-            AppError::Conflict(_) => StatusCode::CONFLICT,
-            AppError::Database(_) | AppError::Io(_) | AppError::Internal { .. } => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
-        }
-    }
-
-    fn error_response(&self) -> HttpResponse {
-        match self {
-            AppError::Database(_) | AppError::Io(_) | AppError::Internal { .. } => {
-                tracing::error!(error = %self, source = ?std::error::Error::source(self), "internal error");
-                HttpResponse::build(self.status_code()).body("internal server error")
-            }
-            _ => HttpResponse::build(self.status_code()).body(self.to_string()),
-        }
-    }
-}

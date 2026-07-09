@@ -1,6 +1,8 @@
 use actix_web::{get, App, HttpResponse, HttpServer};
 use tracing_actix_web::TracingLogger;
 
+mod error;
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenvy::dotenv().ok();
