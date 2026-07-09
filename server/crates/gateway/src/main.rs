@@ -1,4 +1,4 @@
-use actix_web::{get, App, HttpResponse, HttpServer};
+use actix_web::{App, HttpServer};
 use tracing_actix_web::TracingLogger;
 
 use iono_core::Config;
@@ -14,7 +14,13 @@ async fn main() -> std::io::Result<()> {
 
     let config = Config::from_env();
 
-    tracing::info!("iono-gateway listening on http://0.0.0.0:8080");
+    tracing::info!(
+        "{}",
+        format!(
+            "iono-gateway listening on http://{}:{}",
+            config.host, config.gateway_port
+        )
+    );
 
     HttpServer::new(|| App::new().wrap(TracingLogger::default()))
         .bind((config.host, config.gateway_port))?
