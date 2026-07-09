@@ -2058,6 +2058,7 @@ dependencies = [
  "async-trait",
  "aws-config",
  "aws-sdk-s3",
+ "chrono",
  "image",
  "infer",
  "secrecy",

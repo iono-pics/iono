@@ -1,6 +1,7 @@
 pub mod config;
 pub mod content_type;
 pub mod db;
+pub mod entities;
 pub mod error;
 pub mod storage;
 
