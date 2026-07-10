@@ -4,6 +4,7 @@ use tracing_actix_web::TracingLogger;
 use iono_core::{db, Config};
 
 mod error;
+mod routes;
 mod state;
 
 use state::AppState;
@@ -32,6 +33,8 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .wrap(TracingLogger::default())
             .app_data(state.clone())
+            .service(routes::signup::signup)
+            .service(routes::login::login)
     })
     .bind((host, port))?
     .run()

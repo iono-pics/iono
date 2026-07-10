@@ -17,6 +17,9 @@ pub struct Config {
     pub s3_access_key_id: String,
     pub s3_secret_access_key: SecretString,
 
+    pub jwt_secret: SecretString,
+    pub jwt_access_ttl_minutes: i64,
+
     pub max_upload_size_bytes: usize,
 }
 
@@ -41,6 +44,16 @@ impl Config {
             s3_endpoint: env::var("S3_ENDPOINT").ok().filter(|s| !s.is_empty()),
             s3_access_key_id: env_or("S3_ACCESS_KEY_ID", ""),
             s3_secret_access_key: env_secret_or("S3_SECRET_ACCESS_KEY", ""),
+
+            jwt_secret: SecretString::from(
+                env::var("JWT_SECRET")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .expect("JWT_SECRET must be set"),
+            ),
+            jwt_access_ttl_minutes: env_or("JWT_ACCESS_TTL_MINUTES", "1440")
+                .parse()
+                .expect("JWT_ACCESS_TTL_MINUTES malformed"),
 
             max_upload_size_bytes: env_or("MAX_UPLOAD_SIZE_MB", "10240")
                 .parse::<usize>()
