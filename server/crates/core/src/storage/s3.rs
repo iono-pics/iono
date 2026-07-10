@@ -15,7 +15,6 @@ use crate::storage::Storage;
 pub struct S3Storage {
     client: Client,
     bucket: String,
-    public_url_base: Option<String>,
 }
 
 impl S3Storage {
@@ -41,7 +40,6 @@ impl S3Storage {
         Ok(Self {
             client: Client::from_conf(s3_config),
             bucket: config.s3_bucket.clone(),
-            public_url_base: config.s3_public_url_base.clone(),
         })
     }
 }
@@ -62,10 +60,6 @@ impl Storage for S3Storage {
     }
 
     async fn public_url(&self, key: &str, content_type: &str) -> AppResult<String> {
-        if let Some(base) = &self.public_url_base {
-            return Ok(format!("{}/{key}", base.trim_end_matches('/')));
-        }
-
         let presigned = self
             .client
             .get_object()

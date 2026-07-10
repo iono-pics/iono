@@ -16,7 +16,6 @@ pub struct Config {
     pub s3_endpoint: Option<String>,
     pub s3_access_key_id: String,
     pub s3_secret_access_key: SecretString,
-    pub s3_public_url_base: Option<String>,
 
     pub max_upload_size_bytes: usize,
 }
@@ -42,9 +41,6 @@ impl Config {
             s3_endpoint: env::var("S3_ENDPOINT").ok().filter(|s| !s.is_empty()),
             s3_access_key_id: env_or("S3_ACCESS_KEY_ID", ""),
             s3_secret_access_key: env_secret_or("S3_SECRET_ACCESS_KEY", ""),
-            s3_public_url_base: env::var("S3_PUBLIC_URL_BASE")
-                .ok()
-                .filter(|s| !s.is_empty()),
 
             max_upload_size_bytes: env_or("MAX_UPLOAD_SIZE_MB", "10240")
                 .parse::<usize>()

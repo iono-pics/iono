@@ -3,6 +3,7 @@ use tracing_actix_web::TracingLogger;
 
 use iono_core::{db, storage, Config};
 
+mod auth;
 mod error;
 mod routes;
 mod state;
@@ -31,7 +32,11 @@ async fn main() -> std::io::Result<()> {
 
     tracing::info!("iono-ingest listening on http://{}:{}", host, port);
 
-    let state = web::Data::new(AppState { storage, db, config });
+    let state = web::Data::new(AppState {
+        storage,
+        db,
+        config,
+    });
 
     HttpServer::new(move || {
         App::new()

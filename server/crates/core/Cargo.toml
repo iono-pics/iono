@@ -17,6 +17,9 @@ sqlx.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 secrecy.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rand.workspace = true
 
 tracing.workspace = true
 
