@@ -25,6 +25,7 @@ impl ResponseError for ApiError {
             AppError::Unauthorized => StatusCode::UNAUTHORIZED,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::Conflict(_) => StatusCode::CONFLICT,
+            AppError::PaymentRequired(_) => StatusCode::PAYMENT_REQUIRED,
             AppError::Database(_) | AppError::Io(_) | AppError::Internal { .. } => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }

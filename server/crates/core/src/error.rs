@@ -14,6 +14,9 @@ pub enum AppError {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    #[error("payment required: {0}")]
+    PaymentRequired(String),
+
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 

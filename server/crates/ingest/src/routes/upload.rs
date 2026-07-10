@@ -39,6 +39,8 @@ pub async fn upload_file(
         return Err(AppError::BadRequest("missing file".into()).into());
     }
 
+    iono_core::quota::check_before_upload(&state.db, &user.0.id, data.len() as i64).await?;
+
     let (mime_type, data) = tokio::task::spawn_blocking(move || {
         let mime_type = content_type::detect(&data);
         (mime_type, data)
