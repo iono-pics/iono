@@ -34,9 +34,7 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .wrap(TracingLogger::default())
             .app_data(state.clone())
-            .service(routes::signup::signup)
-            .service(routes::login::login)
-            .service(routes::me::me)
+            .configure(routes::configure)
     })
     .bind((host, port))?
     .run()

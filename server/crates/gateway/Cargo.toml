@@ -11,6 +11,7 @@ workspace = true
 iono-core.workspace = true
 
 actix-web.workspace = true
+actix-governor.workspace = true
 
 tokio.workspace = true
 sqlx.workspace = true
