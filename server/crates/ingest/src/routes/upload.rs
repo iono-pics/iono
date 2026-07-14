@@ -1,11 +1,13 @@
-use actix_multipart::form::{bytes::Bytes, MultipartForm};
+use actix_multipart::form::{bytes::Bytes, text::Text, MultipartForm};
 use actix_web::{post, web, HttpResponse};
+use chrono::{Duration, Utc};
 use iono_core::{
-    auth::token,
+    auth::{password, token},
     content_type,
     entities::{File, UserSettings},
     AppError,
 };
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -15,6 +17,8 @@ use crate::{auth::ApiKeyUser, error::ApiResult, state::AppState};
 pub struct UploadForm {
     #[schema(value_type = String, format = Binary)]
     file: Bytes,
+    #[schema(value_type = Option<String>)]
+    password: Option<Text<String>>,
 }
 
 #[utoipa::path(
@@ -41,6 +45,19 @@ pub async fn upload_file(
         return Err(AppError::BadRequest("missing file".into()).into());
     }
 
+    let plain_password = form
+        .password
+        .map(|t| t.into_inner())
+        .filter(|p| !p.is_empty());
+    let password_hash = match plain_password.clone() {
+        Some(p) => Some(
+            tokio::task::spawn_blocking(move || password::hash_password(&p))
+                .await
+                .map_err(|e| AppError::internal_from("password hashing task panicked", e))??,
+        ),
+        None => None,
+    };
+
     iono_core::quota::check_before_upload(&state.db, &user.0.id, data.len() as i64).await?;
 
     let settings =
@@ -50,6 +67,10 @@ pub async fn upload_file(
             .await
             .map_err(AppError::from)?
             .ok_or_else(|| AppError::internal("user has no settings configured"))?;
+
+    let expires_at = settings
+        .default_expires_in_seconds
+        .map(|secs| Utc::now() + Duration::seconds(secs));
 
     let (mime_type, data) = tokio::task::spawn_blocking(move || {
         let mime_type = content_type::detect(&data);
@@ -86,8 +107,8 @@ pub async fn upload_file(
 
         sqlx::query_as::<_, File>(
             r#"
-            INSERT INTO files (id, user_id, display_name, original_name, content_type, size_bytes)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO files (id, user_id, display_name, original_name, content_type, size_bytes, password_hash, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING *
             "#,
         )
@@ -97,6 +118,8 @@ pub async fn upload_file(
         .bind(&s3_key_finalize)
         .bind(&mime_type_finalize)
         .bind(size_bytes)
+        .bind(&password_hash)
+        .bind(expires_at)
         .fetch_one(&db)
         .await
         .map_err(AppError::from)
@@ -124,11 +147,17 @@ pub async fn upload_file(
         .map(|p| format!("{p}/"))
         .unwrap_or_default();
 
-    let url = if settings.raw_links_only {
+    let mut url = if settings.raw_links_only {
         format!("https://{files_domain}/{prefix}raw/{}", file.display_name)
     } else {
         format!("https://{files_domain}/{prefix}{}", file.display_name)
     };
+    if let Some(p) = &plain_password {
+        url.push_str(&format!(
+            "?password={}",
+            utf8_percent_encode(p, NON_ALPHANUMERIC)
+        ));
+    }
 
     Ok(HttpResponse::Created().json(serde_json::json!({ "url": url })))
 }
