@@ -100,6 +100,7 @@ pub async fn upload_file(
     let display_name_finalize = display_name.clone();
     let mime_type_finalize = mime_type.clone();
 
+    // detached so a client disconnecting cant cancel between the S3 write and db insert
     let finalize = tokio::spawn(async move {
         storage
             .save(&s3_key_finalize, &data, &mime_type_finalize)
