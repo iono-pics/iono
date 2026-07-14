@@ -58,11 +58,7 @@ async fn main() -> std::io::Result<()> {
 
     tracing::info!("iono-viewer listening on http://{}:{}", host, port);
 
-    let state = web::Data::new(AppState {
-        storage,
-        db,
-        config,
-    });
+    let state = web::Data::new(AppState { storage, db });
 
     HttpServer::new(move || {
         App::new()
