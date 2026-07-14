@@ -15,6 +15,7 @@ interface Env {
 	S3_ACCESS_KEY_ID: string;
 	S3_SECRET_ACCESS_KEY: string;
 	JWT_SECRET: string;
+	RUST_LOG?: string;
 }
 
 export class ServerContainer extends Container<Env> {
@@ -28,6 +29,7 @@ export class ServerContainer extends Container<Env> {
 		S3_ACCESS_KEY_ID: this.env.S3_ACCESS_KEY_ID,
 		S3_SECRET_ACCESS_KEY: this.env.S3_SECRET_ACCESS_KEY,
 		JWT_SECRET: this.env.JWT_SECRET,
+		...(this.env.RUST_LOG ? { RUST_LOG: this.env.RUST_LOG } : {}),
 	};
 
 	override async fetch(request: Request): Promise<Response> {

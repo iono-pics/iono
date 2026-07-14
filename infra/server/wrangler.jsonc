@@ -18,7 +18,7 @@
 	"vars": {
 		"API_HOST": "api.iono.pics",
 		"INGEST_HOST": "up.iono.pics",
-		"RUST_LOG": "warn"
+		"RUST_LOG": "info"
 	},
 	"routes": [
 		{ "pattern": "api.iono.pics", "custom_domain": true },
