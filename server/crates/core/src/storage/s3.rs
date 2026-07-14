@@ -1,15 +1,13 @@
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::config::{Credentials, Region};
-use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 use secrecy::ExposeSecret;
-use std::time::Duration;
 
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
-use crate::storage::Storage;
+use crate::storage::{Storage, StoredObject};
 
 #[derive(Clone)]
 pub struct S3Storage {
@@ -59,20 +57,38 @@ impl Storage for S3Storage {
         Ok(())
     }
 
-    async fn public_url(&self, key: &str, content_type: &str) -> AppResult<String> {
-        let presigned = self
+    async fn get(&self, key: &str, range: Option<&str>) -> AppResult<StoredObject> {
+        let object = self
             .client
             .get_object()
             .bucket(&self.bucket)
             .key(key)
-            .response_content_type(content_type)
-            .presigned(
-                PresigningConfig::expires_in(Duration::from_secs(3600))
-                    .map_err(|e| AppError::internal_from("presign config failed", e))?,
-            )
+            .set_range(range.map(str::to_owned))
+            .send()
             .await
-            .map_err(|e| AppError::internal_from("s3 presign failed", e))?;
+            .map_err(|e| {
+                if e.raw_response().map(|r| r.status().as_u16()) == Some(416) {
+                    AppError::RangeNotSatisfiable
+                } else {
+                    AppError::internal_from("s3 get_object failed", e)
+                }
+            })?;
 
-        Ok(presigned.uri().to_string())
+        let content_length = object
+            .content_length()
+            .and_then(|len| u64::try_from(len).ok());
+        let content_range = object.content_range().map(str::to_owned);
+
+        let stream = futures_util::stream::unfold(object.body, |mut body| async move {
+            body.next()
+                .await
+                .map(|chunk| (chunk.map_err(std::io::Error::other), body))
+        });
+
+        Ok(StoredObject {
+            stream: Box::pin(stream),
+            content_length,
+            content_range,
+        })
     }
 }

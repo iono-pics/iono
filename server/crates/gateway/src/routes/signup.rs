@@ -1,38 +1,70 @@
 use actix_web::{post, web, HttpResponse};
+use email_address::EmailAddress;
 use iono_core::{
     auth::{jwt, password, token},
     entities::User,
     AppError,
 };
-use regex::Regex;
 use secrecy::ExposeSecret;
 use serde::Deserialize;
-use std::sync::LazyLock;
+use utoipa::ToSchema;
 use uuid::Uuid;
-
-static EMAIL_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[\w.+-]+@([\w-]+\.)+[\w-]{2,}$").unwrap());
+use validator::{Validate, ValidationError};
 
 use crate::{error::ApiResult, state::AppState};
 
-const MIN_PASSWORD_LEN: usize = 8;
-const MAX_PASSWORD_LEN: usize = 256;
-const MIN_USERNAME_LEN: usize = 3;
-const MAX_USERNAME_LEN: usize = 32;
-
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate, ToSchema)]
 pub struct SignupRequest {
+    #[validate(
+        length(min = 3, max = 32, message = "username must be 3-32 characters"),
+        custom(
+            function = "username_chars",
+            message = "username may only contain letters, numbers, '_', and '-'"
+        )
+    )]
     username: String,
+    #[validate(custom(function = "email", message = "invalid email address"))]
     email: String,
+    #[validate(length(min = 8, max = 256, message = "password must be 8-256 characters"))]
     password: String,
 }
 
+fn username_chars(username: &str) -> Result<(), ValidationError> {
+    if username
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        Ok(())
+    } else {
+        Err(ValidationError::new("username_chars"))
+    }
+}
+
+fn email(email: &str) -> Result<(), ValidationError> {
+    if EmailAddress::is_valid(email) {
+        Ok(())
+    } else {
+        Err(ValidationError::new("email"))
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/auth/signup",
+    request_body = SignupRequest,
+    responses(
+        (status = 201, description = "account created"),
+        (status = 400, description = "validation failed"),
+        (status = 409, description = "username or email already taken")
+    )
+)]
 #[post("/signup")]
 pub async fn signup(
     state: web::Data<AppState>,
     body: web::Json<SignupRequest>,
 ) -> ApiResult<HttpResponse> {
-    validate_signup(&body)?;
+    body.validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
     let plain_password = body.password.clone();
     let password_hash =
@@ -84,44 +116,4 @@ pub async fn signup(
     Ok(HttpResponse::Created().json(serde_json::json!({
         "access_token": access_token,
     })))
-}
-
-fn validate_signup(body: &SignupRequest) -> Result<(), AppError> {
-    let username_len = body.username.chars().count();
-    if !(MIN_USERNAME_LEN..=MAX_USERNAME_LEN).contains(&username_len) {
-        return Err(AppError::BadRequest(format!(
-            "username must be {MIN_USERNAME_LEN}-{MAX_USERNAME_LEN} characters"
-        )));
-    }
-    if !body
-        .username
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        return Err(AppError::BadRequest(
-            "username may only contain letters, numbers, '_', and '-'".into(),
-        ));
-    }
-
-    if !is_email(&body.email) {
-        return Err(AppError::BadRequest("invalid email address".into()));
-    }
-
-    let password_len = body.password.chars().count();
-    if password_len < MIN_PASSWORD_LEN {
-        return Err(AppError::BadRequest(format!(
-            "password must be at least {MIN_PASSWORD_LEN} characters"
-        )));
-    }
-    if password_len > MAX_PASSWORD_LEN {
-        return Err(AppError::BadRequest(format!(
-            "password must be at most {MAX_PASSWORD_LEN} characters"
-        )));
-    }
-
-    Ok(())
-}
-
-fn is_email(email: &str) -> bool {
-    EMAIL_RE.is_match(email)
 }

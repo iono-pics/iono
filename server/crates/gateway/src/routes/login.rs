@@ -6,15 +6,26 @@ use iono_core::{
 };
 use secrecy::ExposeSecret;
 use serde::Deserialize;
+use utoipa::ToSchema;
 
 use crate::{error::ApiResult, state::AppState};
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct LoginRequest {
+    /// username or email
     identifier: String,
     password: String,
 }
 
+#[utoipa::path(
+    post,
+    path = "/auth/login",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "returns access token"),
+        (status = 401, description = "invalid credentials")
+    )
+)]
 #[post("/login")]
 pub async fn login(
     state: web::Data<AppState>,

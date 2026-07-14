@@ -44,4 +44,7 @@ pub struct DomainSettings {
     pub short_links_domain_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub files_path_prefix: Option<String>,
+    pub pastes_path_prefix: Option<String>,
+    pub short_links_path_prefix: Option<String>,
 }

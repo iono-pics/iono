@@ -1,5 +1,5 @@
 [package]
-name = "iono-ingest"
+name = "iono-viewer"
 edition.workspace = true
 version.workspace = true
 authors.workspace = true
@@ -11,16 +11,16 @@ workspace = true
 iono-core.workspace = true
 
 actix-web.workspace = true
-actix-multipart.workspace = true
-actix-cors.workspace = true
-actix-web-httpauth.workspace = true
-utoipa.workspace = true
 
 tokio.workspace = true
 sqlx.workspace = true
 
+serde.workspace = true
 serde_json.workspace = true
-uuid.workspace = true
+chrono.workspace = true
+percent-encoding.workspace = true
+humansize.workspace = true
+maud.workspace = true
 
 dotenvy.workspace = true
 

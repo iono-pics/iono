@@ -8,8 +8,18 @@
 		{
 			"class_name": "ServerContainer",
 			"image": "../../server/Dockerfile",
+			"instance_type": "basic",
 			"max_instances": 10
 		}
+	],
+	"vars": {
+		"API_HOST": "api.iono.pics",
+		"INGEST_HOST": "up.iono.pics"
+	},
+	"routes": [
+		{ "pattern": "api.iono.pics", "custom_domain": true },
+		{ "pattern": "cdn.iono.pics", "custom_domain": true },
+		{ "pattern": "up.iono.pics", "custom_domain": true }
 	],
 	"durable_objects": {
 		"bindings": [

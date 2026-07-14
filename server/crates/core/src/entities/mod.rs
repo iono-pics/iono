@@ -12,6 +12,7 @@ mod stripe_event;
 mod subscription;
 mod totp_recovery_code;
 mod user;
+mod user_settings;
 
 pub use api_key::ApiKey;
 pub use domain::{Domain, DomainInvite, DomainSettings, DomainStatus, DomainVisibility};
@@ -27,3 +28,4 @@ pub use stripe_event::StripeEvent;
 pub use subscription::{Subscription, SubscriptionStatus};
 pub use totp_recovery_code::TotpRecoveryCode;
 pub use user::User;
+pub use user_settings::{DisplayNameStyle, UserSettings};

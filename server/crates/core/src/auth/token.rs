@@ -1,10 +1,49 @@
-use rand::Rng;
+use rand::{Rng, RngExt};
 use sha2::{Digest, Sha256};
+
+use crate::entities::DisplayNameStyle;
+
+const NORMAL_ALPHABET: &[char] = &[
+    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S',
+    'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l',
+    'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '0', '1', '2', '3', '4',
+    '5', '6', '7', '8', '9',
+];
+
+const EMOJI_ALPHABET: &[char] = &[
+    '😀', '😁', '😂', '🤣', '😊', '😍', '😎', '🤩', '🥳', '😴', '🤔', '🙄', '😱', '🥶', '🥵', '👻',
+    '🤖', '👽', '🎃', '🐶', '🐱', '🦊', '🐼', '🦁', '🐸', '🐵', '🍕', '🍔', '🍟', '🌮', '🍩', '🍦',
+    '🚀', '⭐', '🔥', '💎', '🎉', '🎈', '🌈', '⚡', '🍀', '🎵', '🎶',
+];
+
+const ACCENTS_ALPHABET: &[char] = &[
+    'à', 'á', 'â', 'ã', 'ä', 'å', 'è', 'é', 'ê', 'ë', 'ì', 'í', 'î', 'ï', 'ò', 'ó', 'ô', 'õ', 'ö',
+    'ù', 'ú', 'û', 'ü', 'ý', 'ÿ', 'ñ', 'ç', 'À', 'Á', 'Â', 'Ã', 'Ä', 'Å', 'È', 'É', 'Ê', 'Ë', 'Ì',
+    'Í', 'Î', 'Ï', 'Ò', 'Ó', 'Ô', 'Õ', 'Ö', 'Ù', 'Ú', 'Û', 'Ü', 'Ý', 'Ñ', 'Ç',
+];
+
+const INVISIBLE_ALPHABET: &[char] = &[
+    '\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}', '\u{180E}', '\u{2061}', '\u{2062}',
+    '\u{2063}', '\u{2064}',
+];
 
 pub fn generate_api_token() -> String {
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
     format!("iono_{}", hex::encode(bytes))
+}
+
+pub fn generate_display_name(length: usize, style: &DisplayNameStyle) -> String {
+    let alphabet: &[char] = match style {
+        DisplayNameStyle::Normal => NORMAL_ALPHABET,
+        DisplayNameStyle::Emoji => EMOJI_ALPHABET,
+        DisplayNameStyle::Accents => ACCENTS_ALPHABET,
+        DisplayNameStyle::Invisible => INVISIBLE_ALPHABET,
+    };
+    let mut rng = rand::rng();
+    (0..length)
+        .map(|_| alphabet[rng.random_range(0..alphabet.len())])
+        .collect()
 }
 
 pub fn hash_api_token(token: &str) -> String {
@@ -34,5 +73,50 @@ mod tests {
     #[test]
     fn tokens_have_prefix() {
         assert!(generate_api_token().starts_with("iono_"));
+    }
+
+    #[test]
+    fn display_names_have_requested_length() {
+        assert_eq!(
+            generate_display_name(16, &DisplayNameStyle::Normal)
+                .chars()
+                .count(),
+            16
+        );
+        assert_eq!(
+            generate_display_name(32, &DisplayNameStyle::Emoji)
+                .chars()
+                .count(),
+            32
+        );
+    }
+
+    #[test]
+    fn normal_style_is_alphanumeric() {
+        assert!(generate_display_name(32, &DisplayNameStyle::Normal)
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn each_style_only_uses_its_own_alphabet() {
+        for (style, alphabet) in [
+            (DisplayNameStyle::Normal, NORMAL_ALPHABET),
+            (DisplayNameStyle::Emoji, EMOJI_ALPHABET),
+            (DisplayNameStyle::Accents, ACCENTS_ALPHABET),
+            (DisplayNameStyle::Invisible, INVISIBLE_ALPHABET),
+        ] {
+            assert!(generate_display_name(32, &style)
+                .chars()
+                .all(|c| alphabet.contains(&c)));
+        }
+    }
+
+    #[test]
+    fn display_names_are_different() {
+        assert_ne!(
+            generate_display_name(16, &DisplayNameStyle::Normal),
+            generate_display_name(16, &DisplayNameStyle::Normal)
+        );
     }
 }

@@ -1,4 +1,5 @@
 use actix_web::{dev::Payload, web, FromRequest, HttpRequest};
+use actix_web_httpauth::extractors::bearer::BearerAuth;
 use iono_core::{auth::jwt, entities::User, AppError};
 use secrecy::ExposeSecret;
 use std::future::Future;
@@ -12,13 +13,14 @@ impl FromRequest for JwtUser {
     type Error = ApiError;
     type Future = Pin<Box<dyn Future<Output = Result<Self, Self::Error>>>>;
 
-    fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
+    fn from_request(req: &HttpRequest, payload: &mut Payload) -> Self::Future {
+        let bearer = BearerAuth::from_request(req, payload);
         let req = req.clone();
         Box::pin(async move {
             let state = app_state(&req)?;
-            let bearer = bearer_token(&req).ok_or(ApiError(AppError::Unauthorized))?;
+            let bearer = bearer.await.map_err(|_| ApiError(AppError::Unauthorized))?;
             let claims =
-                jwt::verify_access_token(&bearer, state.config.jwt_secret.expose_secret())?;
+                jwt::verify_access_token(bearer.token(), state.config.jwt_secret.expose_secret())?;
 
             let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
                 .bind(&claims.sub)
@@ -40,9 +42,4 @@ fn app_state(req: &HttpRequest) -> Result<web::Data<AppState>, ApiError> {
     req.app_data::<web::Data<AppState>>()
         .cloned()
         .ok_or_else(|| ApiError(AppError::internal("AppState not registered")))
-}
-
-fn bearer_token(req: &HttpRequest) -> Option<String> {
-    let raw = req.headers().get("Authorization")?.to_str().ok()?;
-    Some(raw.strip_prefix("Bearer ").unwrap_or(raw).to_string())
 }

@@ -4,6 +4,15 @@ use uuid::Uuid;
 
 use crate::{auth::JwtUser, error::ApiResult, state::AppState};
 
+#[utoipa::path(
+    post,
+    path = "/user/apikeys/regenerate",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "returns the new api key"),
+        (status = 401, description = "missing or invalid token")
+    )
+)]
 #[post("/apikeys/regenerate")]
 pub async fn regenerate_apikey(
     state: web::Data<AppState>,

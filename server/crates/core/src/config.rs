@@ -7,6 +7,7 @@ pub struct Config {
     pub host: String,
     pub gateway_port: u16,
     pub ingest_port: u16,
+    pub viewer_port: u16,
 
     pub database_url: SecretString,
     pub database_max_connections: u32,
@@ -33,6 +34,9 @@ impl Config {
             ingest_port: env_or("INGEST_PORT", "8081")
                 .parse()
                 .expect("INGEST_PORT malformed"),
+            viewer_port: env_or("VIEWER_PORT", "8082")
+                .parse()
+                .expect("VIEWER_PORT malformed"),
 
             database_url: env_secret_or("DATABASE_URL", "postgres://iono:iono@localhost:5432/iono"),
             database_max_connections: env_or("DATABASE_MAX_CONNECTIONS", "10")

@@ -17,6 +17,9 @@ pub enum AppError {
     #[error("payment required: {0}")]
     PaymentRequired(String),
 
+    #[error("range not satisfiable")]
+    RangeNotSatisfiable,
+
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 

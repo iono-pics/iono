@@ -46,6 +46,10 @@ pub fn extension_for(mime_type: &str) -> &'static str {
     }
 }
 
+pub fn is_inline_safe(mime_type: &str) -> bool {
+    is_trusted_image_signature(mime_type) || is_trusted_video_signature(mime_type)
+}
+
 fn decodes_as_image(bytes: &[u8]) -> bool {
     let Ok(mut reader) = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format() else {
         return false;
