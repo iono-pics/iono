@@ -4,6 +4,9 @@
 	"main": "src/index.ts",
 	"compatibility_date": "2026-07-09",
 	"compatibility_flags": ["nodejs_compat"],
+	"observability": {
+    	"enabled": true,
+  	},
 	"containers": [
 		{
 			"class_name": "ServerContainer",
@@ -14,7 +17,8 @@
 	],
 	"vars": {
 		"API_HOST": "api.iono.pics",
-		"INGEST_HOST": "up.iono.pics"
+		"INGEST_HOST": "up.iono.pics",
+		"RUST_LOG": "warn"
 	},
 	"routes": [
 		{ "pattern": "api.iono.pics", "custom_domain": true },
