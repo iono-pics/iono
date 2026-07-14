@@ -8,4 +8,4 @@ FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/target/release/iono-gateway /app/target/release/iono-ingest /app/target/release/iono-viewer /usr/local/bin/
 EXPOSE 8080 8081 8082
-CMD ["bash", "-c", "iono-gateway & iono-ingest & iono-viewer & wait -n"]
+CMD ["bash", "-c", "iono-gateway & GW=$!; iono-ingest & IN=$!; iono-viewer & VW=$!; trap 'kill -TERM $GW $IN $VW 2>/dev/null; wait $GW $IN $VW' TERM INT; wait -n"]
