@@ -19,6 +19,7 @@ pub struct StoredObject {
 pub trait Storage: Send + Sync {
     async fn save(&self, key: &str, data: &[u8], content_type: &str) -> AppResult<()>;
     async fn get(&self, key: &str, range: Option<&str>) -> AppResult<StoredObject>;
+    async fn delete(&self, key: &str) -> AppResult<()>;
 }
 
 pub async fn build(config: &Config) -> AppResult<Arc<dyn Storage>> {

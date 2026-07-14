@@ -91,4 +91,15 @@ impl Storage for S3Storage {
             content_range,
         })
     }
+
+    async fn delete(&self, key: &str) -> AppResult<()> {
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|e| AppError::internal_from("s3 delete_object failed", e))?;
+        Ok(())
+    }
 }
