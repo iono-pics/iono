@@ -1,6 +1,7 @@
 pub mod api_keys;
 pub mod login;
 pub mod me;
+pub mod settings;
 pub mod signup;
 
 use actix_governor::governor::middleware::NoOpMiddleware;
@@ -55,9 +56,15 @@ static AUTH_GOVERNOR: LazyLock<GovernorConfig<ClientIpKeyExtractor, NoOpMiddlewa
         signup::signup,
         login::login,
         me::me,
-        api_keys::regenerate_apikey
+        api_keys::regenerate_apikey,
+        settings::update_settings
     ),
-    components(schemas(signup::SignupRequest, login::LoginRequest)),
+    components(schemas(
+        signup::SignupRequest,
+        login::LoginRequest,
+        settings::UpdateSettingsRequest,
+        settings::SelfDestructDuration
+    )),
     modifiers(&BearerSecurity)
 )]
 struct ApiDoc;
@@ -77,7 +84,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     .service(
         web::scope("/user")
             .service(me::me)
-            .service(api_keys::regenerate_apikey),
+            .service(api_keys::regenerate_apikey)
+            .service(settings::update_settings),
     )
     .service(openapi_spec);
 }

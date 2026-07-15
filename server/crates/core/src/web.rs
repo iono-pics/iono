@@ -70,7 +70,10 @@ pub fn cors(methods: impl IntoIterator<Item = Method>) -> Cors {
 
 pub fn append_password_query(base: &str, password: Option<&str>) -> String {
     match password {
-        Some(p) => format!("{base}?password={}", utf8_percent_encode(p, NON_ALPHANUMERIC)),
+        Some(p) => format!(
+            "{base}?password={}",
+            utf8_percent_encode(p, NON_ALPHANUMERIC)
+        ),
         None => base.to_string(),
     }
 }
