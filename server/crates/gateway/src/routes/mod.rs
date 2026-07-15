@@ -10,7 +10,7 @@ use actix_governor::{
 };
 use actix_web::dev::ServiceRequest;
 use actix_web::{get, web};
-use iono_core::openapi::BearerSecurity;
+use iono_core::{entities::DisplayNameStyle, openapi::BearerSecurity};
 use std::net::IpAddr;
 use std::sync::LazyLock;
 use utoipa::OpenApi;
@@ -63,7 +63,8 @@ static AUTH_GOVERNOR: LazyLock<GovernorConfig<ClientIpKeyExtractor, NoOpMiddlewa
         signup::SignupRequest,
         login::LoginRequest,
         settings::UpdateSettingsRequest,
-        settings::SelfDestructDuration
+        settings::SelfDestructDuration,
+        DisplayNameStyle
     )),
     modifiers(&BearerSecurity)
 )]
