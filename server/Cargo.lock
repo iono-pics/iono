@@ -2247,7 +2247,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-actix-web",
- "tracing-subscriber",
  "utoipa",
  "uuid",
  "validator",
@@ -2270,7 +2269,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-actix-web",
- "tracing-subscriber",
  "utoipa",
  "uuid",
 ]
@@ -2290,7 +2288,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-actix-web",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -2310,7 +2307,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-actix-web",
- "tracing-subscriber",
 ]
 
 [[package]]
