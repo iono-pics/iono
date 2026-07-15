@@ -1,0 +1,27 @@
+[package]
+name = "iono-janitor"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+iono-core.workspace = true
+
+actix-web.workspace = true
+actix-web-httpauth.workspace = true
+
+tokio.workspace = true
+sqlx.workspace = true
+
+serde_json.workspace = true
+secrecy.workspace = true
+subtle.workspace = true
+
+dotenvy.workspace = true
+
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-actix-web.workspace = true

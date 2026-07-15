@@ -3,6 +3,7 @@ import { Container, getContainer } from "@cloudflare/containers";
 const GATEWAY_PORT = 8080;
 const INGEST_PORT = 8081;
 const VIEWER_PORT = 8082;
+const JANITOR_PORT = 8083;
 
 interface Env {
 	SERVER_CONTAINER: DurableObjectNamespace<ServerContainer>;
@@ -15,6 +16,7 @@ interface Env {
 	S3_ACCESS_KEY_ID: string;
 	S3_SECRET_ACCESS_KEY: string;
 	JWT_SECRET: string;
+	MAINTENANCE_TOKEN: string;
 	RUST_LOG?: string;
 }
 
@@ -29,11 +31,24 @@ export class ServerContainer extends Container<Env> {
 		S3_ACCESS_KEY_ID: this.env.S3_ACCESS_KEY_ID,
 		S3_SECRET_ACCESS_KEY: this.env.S3_SECRET_ACCESS_KEY,
 		JWT_SECRET: this.env.JWT_SECRET,
+		MAINTENANCE_TOKEN: this.env.MAINTENANCE_TOKEN,
 		...(this.env.RUST_LOG ? { RUST_LOG: this.env.RUST_LOG } : {}),
 	};
 
 	override async fetch(request: Request): Promise<Response> {
 		return this.containerFetch(request, portFor(new URL(request.url), this.env));
+	}
+
+	async sweep(): Promise<number> {
+		const res = await this.containerFetch(
+			"http://janitor/sweep",
+			{
+				method: "POST",
+				headers: { Authorization: `Bearer ${this.env.MAINTENANCE_TOKEN}` },
+			},
+			JANITOR_PORT,
+		);
+		return res.status;
 	}
 }
 
@@ -70,5 +85,10 @@ export default {
 			ctx.waitUntil(cache.put(request, response.clone()));
 		}
 		return response;
+	},
+
+	async scheduled(_controller: ScheduledController, env: Env) {
+		const status = await getContainer(env.SERVER_CONTAINER).sweep();
+		console.log(`janitor sweep: ${status}`);
 	},
 };

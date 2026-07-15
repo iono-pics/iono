@@ -2,8 +2,10 @@ use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use aws_sdk_s3::Client;
 use secrecy::ExposeSecret;
+use std::collections::HashSet;
 
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
@@ -101,5 +103,45 @@ impl Storage for S3Storage {
             .await
             .map_err(|e| AppError::internal_from("s3 delete_object failed", e))?;
         Ok(())
+    }
+
+    async fn delete_many(&self, keys: &[String]) -> AppResult<Vec<String>> {
+        let mut failed: HashSet<String> = HashSet::new();
+
+        for chunk in keys.chunks(1000) {
+            let objects = chunk
+                .iter()
+                .map(|key| ObjectIdentifier::builder().key(key).build())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| AppError::internal_from("building delete identifiers failed", e))?;
+
+            let delete = Delete::builder()
+                .set_objects(Some(objects))
+                .quiet(true)
+                .build()
+                .map_err(|e| AppError::internal_from("building delete request failed", e))?;
+
+            let out = self
+                .client
+                .delete_objects()
+                .bucket(&self.bucket)
+                .delete(delete)
+                .send()
+                .await
+                .map_err(|e| AppError::internal_from("s3 delete_objects failed", e))?;
+
+            for err in out.errors() {
+                if let Some(key) = err.key() {
+                    tracing::warn!(key = %key, code = ?err.code(), "object delete failed");
+                    failed.insert(key.to_owned());
+                }
+            }
+        }
+
+        Ok(keys
+            .iter()
+            .filter(|key| !failed.contains(*key))
+            .cloned()
+            .collect())
     }
 }

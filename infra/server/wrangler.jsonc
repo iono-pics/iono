@@ -25,6 +25,9 @@
 		{ "pattern": "cdn.iono.pics", "custom_domain": true },
 		{ "pattern": "up.iono.pics", "custom_domain": true }
 	],
+	"triggers": {
+		"crons": ["0 * * * *"]
+	},
 	"durable_objects": {
 		"bindings": [
 			{
