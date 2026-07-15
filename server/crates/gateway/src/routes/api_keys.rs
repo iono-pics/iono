@@ -2,7 +2,9 @@ use actix_web::{post, web, HttpResponse};
 use iono_core::{auth::token, AppError};
 use uuid::Uuid;
 
-use crate::{auth::JwtUser, error::ApiResult, state::AppState};
+use iono_core::web::ApiResult;
+
+use crate::{auth::JwtUser, state::AppState};
 
 #[utoipa::path(
     post,

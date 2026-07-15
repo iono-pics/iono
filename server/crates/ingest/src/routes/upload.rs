@@ -11,7 +11,9 @@ use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::{auth::ApiKeyUser, error::ApiResult, state::AppState};
+use iono_core::web::ApiResult;
+
+use crate::{auth::ApiKeyUser, state::AppState};
 
 #[derive(MultipartForm, ToSchema)]
 pub struct UploadForm {

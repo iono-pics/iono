@@ -1,7 +1,8 @@
-use actix_web::{http::StatusCode, HttpResponse, ResponseError};
-use iono_core::AppError;
+use actix_web::{http::StatusCode, web, HttpRequest, HttpResponse, ResponseError};
 use serde_json::json;
 use std::fmt;
+
+use crate::error::AppError;
 
 #[derive(Debug)]
 pub struct ApiError(pub AppError);
@@ -44,3 +45,9 @@ impl ResponseError for ApiError {
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
+
+pub fn app_state<T: 'static>(req: &HttpRequest) -> Result<web::Data<T>, ApiError> {
+    req.app_data::<web::Data<T>>()
+        .cloned()
+        .ok_or_else(|| ApiError(AppError::internal("AppState not registered")))
+}

@@ -7,7 +7,10 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
+actix-web.workspace = true
+
 serde.workspace = true
+serde_json.workspace = true
 chrono.workspace = true
 
 thiserror.workspace = true
@@ -26,6 +29,7 @@ argon2.workspace = true
 jsonwebtoken.workspace = true
 
 tracing.workspace = true
+tracing-subscriber.workspace = true
 
 infer.workspace = true
 image.workspace = true

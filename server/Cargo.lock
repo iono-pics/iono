@@ -2203,6 +2203,7 @@ dependencies = [
 name = "iono-core"
 version = "0.1.0"
 dependencies = [
+ "actix-web",
  "argon2",
  "async-trait",
  "aws-config",
@@ -2217,11 +2218,13 @@ dependencies = [
  "rand 0.10.2",
  "secrecy",
  "serde",
+ "serde_json",
  "sha2 0.11.0",
  "sqlx",
  "thiserror",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

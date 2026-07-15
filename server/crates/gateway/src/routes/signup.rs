@@ -11,7 +11,9 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 use validator::{Validate, ValidationError};
 
-use crate::{error::ApiResult, state::AppState};
+use iono_core::web::ApiResult;
+
+use crate::state::AppState;
 
 #[derive(Deserialize, Validate, ToSchema)]
 pub struct SignupRequest {

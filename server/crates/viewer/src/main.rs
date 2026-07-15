@@ -9,7 +9,6 @@ use tracing_actix_web::{DefaultRootSpanBuilder, RootSpanBuilder, TracingLogger};
 use iono_core::{db, storage, Config};
 
 mod embed;
-mod error;
 mod routes;
 mod state;
 
@@ -39,13 +38,7 @@ impl RootSpanBuilder for PathOnlyRootSpan {
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenvy::dotenv().ok();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_ansi(false)
-        .init();
+    iono_core::telemetry::init();  
 
     let config = Config::from_env();
 

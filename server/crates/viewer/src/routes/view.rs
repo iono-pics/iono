@@ -9,7 +9,9 @@ use iono_core::{
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::Deserialize;
 
-use crate::{embed, error::ApiResult, state::AppState};
+use iono_core::web::ApiResult;
+
+use crate::{embed, state::AppState};
 
 #[derive(Deserialize)]
 pub struct ViewQuery {

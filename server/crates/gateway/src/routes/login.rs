@@ -8,7 +8,9 @@ use secrecy::ExposeSecret;
 use serde::Deserialize;
 use utoipa::ToSchema;
 
-use crate::{error::ApiResult, state::AppState};
+use iono_core::web::ApiResult;
+
+use crate::state::AppState;
 
 #[derive(Deserialize, ToSchema)]
 pub struct LoginRequest {

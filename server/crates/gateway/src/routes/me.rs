@@ -1,6 +1,8 @@
 use actix_web::{get, HttpResponse};
 
-use crate::{auth::JwtUser, error::ApiResult};
+use iono_core::web::ApiResult;
+
+use crate::auth::JwtUser;
 
 #[utoipa::path(
     get,

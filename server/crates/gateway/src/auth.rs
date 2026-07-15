@@ -1,11 +1,13 @@
-use actix_web::{dev::Payload, web, FromRequest, HttpRequest};
+use actix_web::{dev::Payload, FromRequest, HttpRequest};
 use actix_web_httpauth::extractors::bearer::BearerAuth;
 use iono_core::{auth::jwt, entities::User, AppError};
 use secrecy::ExposeSecret;
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::{error::ApiError, state::AppState};
+use iono_core::web::{app_state, ApiError};
+
+use crate::state::AppState;
 
 pub struct JwtUser(pub User);
 
@@ -17,7 +19,7 @@ impl FromRequest for JwtUser {
         let bearer = BearerAuth::from_request(req, payload);
         let req = req.clone();
         Box::pin(async move {
-            let state = app_state(&req)?;
+            let state = app_state::<AppState>(&req)?;
             let bearer = bearer.await.map_err(|_| ApiError(AppError::Unauthorized))?;
             let claims =
                 jwt::verify_access_token(bearer.token(), state.config.jwt_secret.expose_secret())?;
@@ -36,10 +38,4 @@ impl FromRequest for JwtUser {
             Ok(JwtUser(user))
         })
     }
-}
-
-fn app_state(req: &HttpRequest) -> Result<web::Data<AppState>, ApiError> {
-    req.app_data::<web::Data<AppState>>()
-        .cloned()
-        .ok_or_else(|| ApiError(AppError::internal("AppState not registered")))
 }

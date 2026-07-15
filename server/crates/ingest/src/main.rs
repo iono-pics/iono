@@ -11,11 +11,10 @@ use utoipa::OpenApi;
 use iono_core::{db, storage, AppError, Config};
 
 mod auth;
-mod error;
 mod routes;
 mod state;
 
-use error::ApiError;
+use iono_core::web::ApiError;
 use state::AppState;
 
 #[derive(OpenApi)]
@@ -34,13 +33,7 @@ async fn openapi_spec() -> web::Json<utoipa::openapi::OpenApi> {
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenvy::dotenv().ok();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_ansi(false)
-        .init();
+    iono_core::telemetry::init();
 
     let config = Config::from_env();
 

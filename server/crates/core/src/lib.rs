@@ -6,6 +6,8 @@ pub mod entities;
 pub mod error;
 pub mod quota;
 pub mod storage;
+pub mod telemetry;
+pub mod web;
 
 pub use config::Config;
 pub use error::AppError;
