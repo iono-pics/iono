@@ -46,6 +46,19 @@ pub fn generate_display_name(length: usize, style: &DisplayNameStyle) -> String 
         .collect()
 }
 
+pub fn generate_recovery_code() -> String {
+    let mut bytes = [0u8; 8];
+    rand::rng().fill_bytes(&mut bytes);
+    let hex = hex::encode(bytes);
+    format!(
+        "{}-{}-{}-{}",
+        &hex[0..4],
+        &hex[4..8],
+        &hex[8..12],
+        &hex[12..16]
+    )
+}
+
 pub fn hash_api_token(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
@@ -110,6 +123,21 @@ mod tests {
                 .chars()
                 .all(|c| alphabet.contains(&c)));
         }
+    }
+
+    #[test]
+    fn recovery_codes_match_expected_format() {
+        let code = generate_recovery_code();
+        let parts: Vec<&str> = code.split('-').collect();
+        assert_eq!(parts.len(), 4);
+        assert!(parts
+            .iter()
+            .all(|p| p.len() == 4 && p.chars().all(|c| c.is_ascii_hexdigit())));
+    }
+
+    #[test]
+    fn recovery_codes_are_different() {
+        assert_ne!(generate_recovery_code(), generate_recovery_code());
     }
 
     #[test]

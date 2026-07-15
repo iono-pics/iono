@@ -24,7 +24,7 @@ pub struct LoginRequest {
     path = "/auth/login",
     request_body = LoginRequest,
     responses(
-        (status = 200, description = "returns access token"),
+        (status = 200, description = "returns access token, or {mfa_required: true, mfa_token} if mfa is enable"),
         (status = 401, description = "invalid credentials")
     )
 )]
@@ -48,6 +48,14 @@ pub async fn login(
 
     if !verified {
         return Err(AppError::Unauthorized.into());
+    }
+
+    if user.totp_enabled {
+        let mfa_token = jwt::issue_mfa_token(&user.id, state.config.jwt_secret.expose_secret())?;
+        return Ok(HttpResponse::Ok().json(serde_json::json!({
+            "mfa_required": true,
+            "mfa_token": mfa_token,
+        })));
     }
 
     let access_token = jwt::issue_access_token(

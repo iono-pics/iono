@@ -61,6 +61,7 @@ hex = "0.4"
 rand = "0.10.2"
 argon2 = "0.5"
 jsonwebtoken = "9"
+totp-rs = { version = "5", features = ["otpauth"] }
 email_address = "0.2"
 validator = { version = "0.20", features = ["derive"] }
 utoipa = { version = "5", features = ["actix_extras"] }

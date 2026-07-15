@@ -4,6 +4,7 @@ pub mod login;
 pub mod me;
 pub mod settings;
 pub mod signup;
+pub mod totp;
 
 use actix_governor::governor::middleware::NoOpMiddleware;
 use actix_governor::{
@@ -59,7 +60,12 @@ static AUTH_GOVERNOR: LazyLock<GovernorConfig<ClientIpKeyExtractor, NoOpMiddlewa
         me::me,
         api_keys::regenerate_apikey,
         settings::update_settings,
-        change_password::change_password
+        change_password::change_password,
+        totp::setup_totp,
+        totp::confirm_totp,
+        totp::disable_totp,
+        totp::regenerate_recovery_codes,
+        totp::verify_login_totp
     ),
     components(schemas(
         signup::SignupRequest,
@@ -67,7 +73,10 @@ static AUTH_GOVERNOR: LazyLock<GovernorConfig<ClientIpKeyExtractor, NoOpMiddlewa
         settings::UpdateSettingsRequest,
         settings::SelfDestructDuration,
         DisplayNameStyle,
-        change_password::ChangePasswordRequest
+        change_password::ChangePasswordRequest,
+        totp::ConfirmTotpRequest,
+        totp::ReauthRequest,
+        totp::VerifyLoginTotpRequest
     )),
     modifiers(&BearerSecurity)
 )]
@@ -83,7 +92,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         web::scope("/auth")
             .wrap(Governor::new(&AUTH_GOVERNOR))
             .service(signup::signup)
-            .service(login::login),
+            .service(login::login)
+            .service(totp::verify_login_totp),
     )
     .service(
         web::scope("/user")
@@ -93,7 +103,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .service(
                 web::scope("")
                     .wrap(Governor::new(&AUTH_GOVERNOR))
-                    .service(change_password::change_password),
+                    .service(change_password::change_password)
+                    .service(totp::setup_totp)
+                    .service(totp::confirm_totp)
+                    .service(totp::disable_totp)
+                    .service(totp::regenerate_recovery_codes),
             ),
     )
     .service(openapi_spec);
