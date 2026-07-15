@@ -1,4 +1,5 @@
 pub mod api_keys;
+pub mod change_password;
 pub mod login;
 pub mod me;
 pub mod settings;
@@ -57,14 +58,16 @@ static AUTH_GOVERNOR: LazyLock<GovernorConfig<ClientIpKeyExtractor, NoOpMiddlewa
         login::login,
         me::me,
         api_keys::regenerate_apikey,
-        settings::update_settings
+        settings::update_settings,
+        change_password::change_password
     ),
     components(schemas(
         signup::SignupRequest,
         login::LoginRequest,
         settings::UpdateSettingsRequest,
         settings::SelfDestructDuration,
-        DisplayNameStyle
+        DisplayNameStyle,
+        change_password::ChangePasswordRequest
     )),
     modifiers(&BearerSecurity)
 )]
@@ -86,7 +89,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         web::scope("/user")
             .service(me::me)
             .service(api_keys::regenerate_apikey)
-            .service(settings::update_settings),
+            .service(settings::update_settings)
+            .service(
+                web::scope("")
+                    .wrap(Governor::new(&AUTH_GOVERNOR))
+                    .service(change_password::change_password),
+            ),
     )
     .service(openapi_spec);
 }
