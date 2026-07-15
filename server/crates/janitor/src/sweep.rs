@@ -74,7 +74,7 @@ async fn run_sweep(state: &AppState) -> Result<(u64, u64), AppError> {
             "#,
         )
         .bind(BATCH_SIZE)
-        .fetch_all(&state.db)
+        .fetch_all(&state.core.db)
         .await?;
 
         if batch.is_empty() {
@@ -83,6 +83,7 @@ async fn run_sweep(state: &AppState) -> Result<(u64, u64), AppError> {
 
         let keys: Vec<String> = batch.iter().map(|(_, key)| key.clone()).collect();
         let deleted_keys: HashSet<String> = state
+            .core
             .storage
             .delete_many(&keys)
             .await?
@@ -103,7 +104,7 @@ async fn run_sweep(state: &AppState) -> Result<(u64, u64), AppError> {
 
         sqlx::query("DELETE FROM files WHERE id = ANY($1)")
             .bind(&deleted_ids)
-            .execute(&state.db)
+            .execute(&state.core.db)
             .await?;
 
         deleted += deleted_ids.len() as u64;

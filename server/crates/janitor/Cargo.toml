@@ -20,7 +20,5 @@ serde_json.workspace = true
 secrecy.workspace = true
 subtle.workspace = true
 
-dotenvy.workspace = true
-
 tracing.workspace = true
 tracing-actix-web.workspace = true

@@ -1,7 +1,7 @@
 use actix_web::{post, web, HttpResponse};
 use email_address::EmailAddress;
 use iono_core::{
-    auth::{jwt, password, token},
+    auth::{jwt, password::hash_password_async, token},
     entities::User,
     AppError,
 };
@@ -68,11 +68,7 @@ pub async fn signup(
     body.validate()
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
-    let plain_password = body.password.clone();
-    let password_hash =
-        tokio::task::spawn_blocking(move || password::hash_password(&plain_password))
-            .await
-            .map_err(|e| AppError::internal_from("password hashing task panicked", e))??;
+    let password_hash = hash_password_async(body.password.clone()).await?;
 
     let id = Uuid::new_v4().to_string();
 

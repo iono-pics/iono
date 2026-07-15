@@ -2,16 +2,15 @@ use actix_multipart::form::{bytes::Bytes, text::Text, MultipartForm};
 use actix_web::{post, web, HttpResponse};
 use chrono::{Duration, Utc};
 use iono_core::{
-    auth::{password, token},
+    auth::{password::hash_password_async, token},
     content_type,
     entities::{File, UserSettings},
     AppError,
 };
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use iono_core::web::ApiResult;
+use iono_core::web::{append_password_query, ApiResult};
 
 use crate::{auth::ApiKeyUser, state::AppState};
 
@@ -52,11 +51,7 @@ pub async fn upload_file(
         .map(|t| t.into_inner())
         .filter(|p| !p.is_empty());
     let password_hash = match plain_password.clone() {
-        Some(p) => Some(
-            tokio::task::spawn_blocking(move || password::hash_password(&p))
-                .await
-                .map_err(|e| AppError::internal_from("password hashing task panicked", e))??,
-        ),
+        Some(p) => Some(hash_password_async(p).await?),
         None => None,
     };
 
@@ -150,17 +145,12 @@ pub async fn upload_file(
         .map(|p| format!("{p}/"))
         .unwrap_or_default();
 
-    let mut url = if settings.raw_links_only {
+    let base_url = if settings.raw_links_only {
         format!("https://{files_domain}/{prefix}raw/{}", file.display_name)
     } else {
         format!("https://{files_domain}/{prefix}{}", file.display_name)
     };
-    if let Some(p) = &plain_password {
-        url.push_str(&format!(
-            "?password={}",
-            utf8_percent_encode(p, NON_ALPHANUMERIC)
-        ));
-    }
+    let url = append_password_query(&base_url, plain_password.as_deref());
 
     Ok(HttpResponse::Created().json(serde_json::json!({ "url": url })))
 }

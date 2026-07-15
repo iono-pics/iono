@@ -1,6 +1,14 @@
-use actix_web::{http::StatusCode, web, HttpRequest, HttpResponse, ResponseError};
+use actix_cors::Cors;
+use actix_web::{
+    dev::Payload,
+    http::{header, Method, StatusCode},
+    web, FromRequest, HttpRequest, HttpResponse, ResponseError,
+};
+use actix_web_httpauth::extractors::bearer::BearerAuth;
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde_json::json;
 use std::fmt;
+use std::future::Future;
 
 use crate::error::AppError;
 
@@ -50,4 +58,32 @@ pub fn app_state<T: 'static>(req: &HttpRequest) -> Result<web::Data<T>, ApiError
     req.app_data::<web::Data<T>>()
         .cloned()
         .ok_or_else(|| ApiError(AppError::internal("AppState not registered")))
+}
+
+pub fn cors(methods: impl IntoIterator<Item = Method>) -> Cors {
+    Cors::default()
+        .allow_any_origin()
+        .allowed_methods(methods)
+        .allowed_headers(vec![header::AUTHORIZATION, header::CONTENT_TYPE])
+        .max_age(3600)
+}
+
+pub fn append_password_query(base: &str, password: Option<&str>) -> String {
+    match password {
+        Some(p) => format!("{base}?password={}", utf8_percent_encode(p, NON_ALPHANUMERIC)),
+        None => base.to_string(),
+    }
+}
+
+pub fn state_and_bearer<T: 'static>(
+    req: &HttpRequest,
+    payload: &mut Payload,
+) -> impl Future<Output = Result<(web::Data<T>, BearerAuth), ApiError>> {
+    let bearer = BearerAuth::from_request(req, payload);
+    let req = req.clone();
+    async move {
+        let state = app_state::<T>(&req)?;
+        let bearer = bearer.await.map_err(|_| ApiError(AppError::Unauthorized))?;
+        Ok((state, bearer))
+    }
 }

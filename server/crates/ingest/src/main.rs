@@ -1,14 +1,9 @@
-use actix_cors::Cors;
 use actix_multipart::form::MultipartFormConfig;
-use actix_web::{
-    get,
-    http::{header, Method},
-    web, App, HttpServer,
-};
+use actix_web::{get, http::Method, web, App, HttpServer};
 use tracing_actix_web::TracingLogger;
 use utoipa::OpenApi;
 
-use iono_core::{db, storage, AppError, Config};
+use iono_core::{openapi::BearerSecurity, AppError};
 
 mod auth;
 mod routes;
@@ -21,7 +16,8 @@ use state::AppState;
 #[openapi(
     info(title = "iono ingest", description = "file uploads"),
     paths(routes::upload::upload_file),
-    components(schemas(routes::upload::UploadForm))
+    components(schemas(routes::upload::UploadForm)),
+    modifiers(&BearerSecurity)
 )]
 struct ApiDoc;
 
@@ -32,18 +28,9 @@ async fn openapi_spec() -> web::Json<utoipa::openapi::OpenApi> {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    dotenvy::dotenv().ok();
-    iono_core::telemetry::init();
+    let config = iono_core::bootstrap::init_config();
 
-    let config = Config::from_env();
-
-    let storage = storage::build(&config)
-        .await
-        .expect("failed to initialize storage backend");
-
-    let db = db::build(&config)
-        .await
-        .expect("failed to connect to database");
+    let state = AppState::build(&config).await;
 
     let host = config.host.clone();
     let port = config.ingest_port;
@@ -51,14 +38,10 @@ async fn main() -> std::io::Result<()> {
 
     tracing::info!("iono-ingest listening on http://{}:{}", host, port);
 
-    let state = web::Data::new(AppState { storage, db });
+    let state = web::Data::new(state);
 
     HttpServer::new(move || {
-        let cors = Cors::default()
-            .allow_any_origin()
-            .allowed_methods([Method::POST])
-            .allowed_headers(vec![header::AUTHORIZATION, header::CONTENT_TYPE])
-            .max_age(3600);
+        let cors = iono_core::web::cors([Method::POST]);
         App::new()
             .wrap(cors)
             .wrap(TracingLogger::default())

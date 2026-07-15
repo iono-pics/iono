@@ -1,6 +1,6 @@
 use actix_web::{post, web, HttpResponse};
 use iono_core::{
-    auth::{jwt, password},
+    auth::{jwt, password::verify_password_async},
     entities::User,
     AppError,
 };
@@ -44,12 +44,7 @@ pub async fn login(
         return Err(AppError::Unauthorized.into());
     };
 
-    let plain_password = body.password.clone();
-    let verified = tokio::task::spawn_blocking(move || {
-        password::verify_password(&plain_password, &password_hash)
-    })
-    .await
-    .map_err(|e| AppError::internal_from("password verification task panicked", e))??;
+    let verified = verify_password_async(body.password.clone(), password_hash).await?;
 
     if !verified {
         return Err(AppError::Unauthorized.into());

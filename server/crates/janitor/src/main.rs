@@ -2,7 +2,7 @@ use actix_web::{web, App, HttpServer};
 use std::sync::Mutex;
 use tracing_actix_web::TracingLogger;
 
-use iono_core::{db, storage, Config};
+use iono_core::state::CoreState;
 
 mod state;
 mod sweep;
@@ -11,24 +11,14 @@ use state::AppState;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    dotenvy::dotenv().ok();
-    iono_core::telemetry::init();
-
-
-    let config = Config::from_env();
+    let config = iono_core::bootstrap::init_config();
 
     let maintenance_token = config
         .maintenance_token
         .clone()
         .expect("MAINTENANCE_TOKEN must be set");
 
-    let storage = storage::build(&config)
-        .await
-        .expect("failed to initialize storage backend");
-
-    let db = db::build(&config)
-        .await
-        .expect("failed to connect to database");
+    let core = CoreState::build(&config).await;
 
     let host = config.host.clone();
     let port = config.janitor_port;
@@ -44,8 +34,7 @@ async fn main() -> std::io::Result<()> {
     tracing::info!("iono-janitor listening on http://{}:{}", host, port);
 
     let state = web::Data::new(AppState {
-        storage,
-        db,
+        core,
         maintenance_token,
         bg: bg.handle().clone(),
         sweep_task: Mutex::new(None),

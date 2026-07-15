@@ -12,8 +12,6 @@ iono-core.workspace = true
 
 actix-web.workspace = true
 actix-governor.workspace = true
-actix-cors.workspace = true
-actix-web-httpauth.workspace = true
 
 tokio.workspace = true
 sqlx.workspace = true
@@ -26,8 +24,6 @@ secrecy.workspace = true
 email_address.workspace = true
 validator.workspace = true
 utoipa.workspace = true
-
-dotenvy.workspace = true
 
 tracing.workspace = true
 tracing-actix-web.workspace = true

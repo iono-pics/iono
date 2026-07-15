@@ -6,8 +6,6 @@ use actix_web::{
 use tracing::Span;
 use tracing_actix_web::{DefaultRootSpanBuilder, RootSpanBuilder, TracingLogger};
 
-use iono_core::{db, storage, Config};
-
 mod embed;
 mod routes;
 mod state;
@@ -37,25 +35,16 @@ impl RootSpanBuilder for PathOnlyRootSpan {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    dotenvy::dotenv().ok();
-    iono_core::telemetry::init();  
+    let config = iono_core::bootstrap::init_config();
 
-    let config = Config::from_env();
-
-    let storage = storage::build(&config)
-        .await
-        .expect("failed to initialize storage backend");
-
-    let db = db::build(&config)
-        .await
-        .expect("failed to connect to database");
+    let state = AppState::build(&config).await;
 
     let host = config.host.clone();
     let port = config.viewer_port;
 
     tracing::info!("iono-viewer listening on http://{}:{}", host, port);
 
-    let state = web::Data::new(AppState { storage, db });
+    let state = web::Data::new(state);
 
     HttpServer::new(move || {
         App::new()

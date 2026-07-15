@@ -8,6 +8,8 @@ workspace = true
 
 [dependencies]
 actix-web.workspace = true
+actix-cors.workspace = true
+actix-web-httpauth.workspace = true
 
 serde.workspace = true
 serde_json.workspace = true
@@ -21,12 +23,16 @@ tokio.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true
 bytes.workspace = true
+percent-encoding.workspace = true
 secrecy.workspace = true
 sha2.workspace = true
 hex.workspace = true
 rand.workspace = true
 argon2.workspace = true
 jsonwebtoken.workspace = true
+utoipa.workspace = true
+
+dotenvy.workspace = true
 
 tracing.workspace = true
 tracing-subscriber.workspace = true

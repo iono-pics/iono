@@ -1,15 +1,14 @@
 use actix_web::{get, http::header, web, HttpRequest, HttpResponse};
 use chrono::Utc;
 use iono_core::{
-    auth::password,
+    auth::password::verify_password_async,
     content_type,
     entities::{EmbedPreset, File},
     AppError,
 };
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::Deserialize;
 
-use iono_core::web::ApiResult;
+use iono_core::web::{append_password_query, ApiResult};
 
 use crate::{embed, state::AppState};
 
@@ -80,7 +79,7 @@ async fn view_page_inner(
         return Err(AppError::NotFound.into());
     }
 
-    let raw_url = raw_url_for(raw_url_base, query.password.as_deref());
+    let raw_url = append_password_query(raw_url_base, query.password.as_deref());
     let preset = fetch_active_preset(state, &file.user_id).await?;
     let html = embed::render_embed_html(&file, &raw_url, preset.as_ref());
 
@@ -211,17 +210,5 @@ async fn unlock(file: &File, provided: Option<&str>) -> Result<bool, AppError> {
         return Ok(false);
     };
 
-    tokio::task::spawn_blocking(move || password::verify_password(&provided, &hash))
-        .await
-        .map_err(|e| AppError::internal_from("password verification task panicked", e))?
-}
-
-fn raw_url_for(base: &str, password: Option<&str>) -> String {
-    match password {
-        Some(p) => format!(
-            "{base}?password={}",
-            utf8_percent_encode(p, NON_ALPHANUMERIC)
-        ),
-        None => base.to_string(),
-    }
+    verify_password_async(provided, hash).await
 }

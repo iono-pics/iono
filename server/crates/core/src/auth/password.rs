@@ -1,7 +1,7 @@
 use argon2::password_hash::{rand_core::OsRng, SaltString};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 
-use crate::error::AppError;
+use crate::error::{AppError, AppResult};
 
 pub fn hash_password(plain: &str) -> Result<String, AppError> {
     let salt = SaltString::generate(&mut OsRng);
@@ -17,6 +17,18 @@ pub fn verify_password(plain: &str, hash: &str) -> Result<bool, AppError> {
     Ok(Argon2::default()
         .verify_password(plain.as_bytes(), &parsed)
         .is_ok())
+}
+
+pub async fn hash_password_async(plain: String) -> AppResult<String> {
+    tokio::task::spawn_blocking(move || hash_password(&plain))
+        .await
+        .map_err(|e| AppError::internal_from("password hashing task panicked", e))?
+}
+
+pub async fn verify_password_async(plain: String, hash: String) -> AppResult<bool> {
+    tokio::task::spawn_blocking(move || verify_password(&plain, &hash))
+        .await
+        .map_err(|e| AppError::internal_from("password verification task panicked", e))?
 }
 
 #[cfg(test)]

@@ -1,11 +1,7 @@
-use actix_cors::Cors;
-use actix_web::{
-    http::{header, Method},
-    web, App, HttpServer,
-};
+use actix_web::{http::Method, web, App, HttpServer};
 use tracing_actix_web::TracingLogger;
 
-use iono_core::{db, Config};
+use iono_core::db;
 
 mod auth;
 mod routes;
@@ -15,10 +11,7 @@ use state::AppState;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    dotenvy::dotenv().ok();
-    iono_core::telemetry::init();
-
-    let config = Config::from_env();
+    let config = iono_core::bootstrap::init_config();
 
     let db = db::build(&config)
         .await
@@ -32,17 +25,13 @@ async fn main() -> std::io::Result<()> {
     let state = web::Data::new(AppState { db, config });
 
     HttpServer::new(move || {
-        let cors = Cors::default()
-            .allow_any_origin()
-            .allowed_methods([
-                Method::GET,
-                Method::POST,
-                Method::PUT,
-                Method::PATCH,
-                Method::DELETE,
-            ])
-            .allowed_headers(vec![header::AUTHORIZATION, header::CONTENT_TYPE])
-            .max_age(3600);
+        let cors = iono_core::web::cors([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ]);
         App::new()
             .wrap(cors)
             .wrap(TracingLogger::default())

@@ -9,10 +9,10 @@ use actix_governor::{
 };
 use actix_web::dev::ServiceRequest;
 use actix_web::{get, web};
+use iono_core::openapi::BearerSecurity;
 use std::net::IpAddr;
 use std::sync::LazyLock;
-use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
-use utoipa::{Modify, OpenApi};
+use utoipa::OpenApi;
 
 // container only sees cf's proxy as peer so we need to read from
 // CF-Connecting-IP for ratelimiting otherwise all ips would be blocked
@@ -61,20 +61,6 @@ static AUTH_GOVERNOR: LazyLock<GovernorConfig<ClientIpKeyExtractor, NoOpMiddlewa
     modifiers(&BearerSecurity)
 )]
 struct ApiDoc;
-
-struct BearerSecurity;
-
-impl Modify for BearerSecurity {
-    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
-        openapi
-            .components
-            .get_or_insert_with(Default::default)
-            .add_security_scheme(
-                "bearer_auth",
-                SecurityScheme::Http(HttpBuilder::new().scheme(HttpAuthScheme::Bearer).build()),
-            );
-    }
-}
 
 #[get("/openapi.json")]
 async fn openapi_spec() -> web::Json<utoipa::openapi::OpenApi> {
