@@ -1,82 +1,37 @@
-pub mod api_keys;
-pub mod change_password;
-pub mod login;
-pub mod me;
-pub mod settings;
-pub mod signup;
-pub mod totp;
+pub mod auth;
+pub mod rate_limit;
+pub mod user;
 
-use actix_governor::governor::middleware::NoOpMiddleware;
-use actix_governor::{
-    Governor, GovernorConfig, GovernorConfigBuilder, KeyExtractor, SimpleKeyExtractionError,
-};
-use actix_web::dev::ServiceRequest;
 use actix_web::{get, web};
 use iono_core::{entities::DisplayNameStyle, openapi::BearerSecurity};
-use std::net::IpAddr;
-use std::sync::LazyLock;
 use utoipa::OpenApi;
-
-// container only sees cf's proxy as peer so we need to read from
-// CF-Connecting-IP for ratelimiting otherwise all ips would be blocked
-#[derive(Clone)]
-pub struct ClientIpKeyExtractor;
-
-impl KeyExtractor for ClientIpKeyExtractor {
-    type Key = IpAddr;
-    type KeyExtractionError = SimpleKeyExtractionError<&'static str>;
-
-    fn extract(&self, req: &ServiceRequest) -> Result<Self::Key, Self::KeyExtractionError> {
-        if let Some(ip) = req
-            .headers()
-            .get("cf-connecting-ip")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.trim().parse::<IpAddr>().ok())
-        {
-            return Ok(ip);
-        }
-        req.peer_addr()
-            .map(|addr| addr.ip())
-            .ok_or_else(|| SimpleKeyExtractionError::new("could not determine client ip"))
-    }
-}
-
-static AUTH_GOVERNOR: LazyLock<GovernorConfig<ClientIpKeyExtractor, NoOpMiddleware>> =
-    LazyLock::new(|| {
-        GovernorConfigBuilder::default()
-            .key_extractor(ClientIpKeyExtractor)
-            .seconds_per_request(2)
-            .burst_size(5)
-            .finish()
-            .expect("governor ratelimit failed to build")
-    });
 
 #[derive(OpenApi)]
 #[openapi(
     info(title = "iono gateway", description = "auth and account management"),
     paths(
-        signup::signup,
-        login::login,
-        me::me,
-        api_keys::regenerate_apikey,
-        settings::update_settings,
-        change_password::change_password,
-        totp::setup_totp,
-        totp::confirm_totp,
-        totp::disable_totp,
-        totp::regenerate_recovery_codes,
-        totp::verify_login_totp
+        auth::signup::signup,
+        auth::login::login,
+        auth::verify_totp::verify_login_totp,
+        user::me::me,
+        user::api_keys::regenerate_apikey,
+        user::settings::update_settings,
+        user::change_password::change_password,
+        user::totp::setup::setup_totp,
+        user::totp::confirm::confirm_totp,
+        user::totp::disable::disable_totp,
+        user::totp::recovery_codes::regenerate_recovery_codes,
     ),
     components(schemas(
-        signup::SignupRequest,
-        login::LoginRequest,
-        settings::UpdateSettingsRequest,
-        settings::SelfDestructDuration,
+        auth::signup::SignupRequest,
+        auth::login::LoginRequest,
+        auth::verify_totp::VerifyLoginTotpRequest,
+        user::settings::UpdateSettingsRequest,
+        user::settings::SelfDestructDuration,
         DisplayNameStyle,
-        change_password::ChangePasswordRequest,
-        totp::ConfirmTotpRequest,
-        totp::ReauthRequest,
-        totp::VerifyLoginTotpRequest
+        user::change_password::ChangePasswordRequest,
+        user::totp::ReauthRequest,
+        user::totp::confirm::ConfirmTotpRequest,
     )),
     modifiers(&BearerSecurity)
 )]
@@ -88,27 +43,7 @@ async fn openapi_spec() -> web::Json<utoipa::openapi::OpenApi> {
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    cfg.service(
-        web::scope("/auth")
-            .wrap(Governor::new(&AUTH_GOVERNOR))
-            .service(signup::signup)
-            .service(login::login)
-            .service(totp::verify_login_totp),
-    )
-    .service(
-        web::scope("/user")
-            .service(me::me)
-            .service(api_keys::regenerate_apikey)
-            .service(settings::update_settings)
-            .service(
-                web::scope("")
-                    .wrap(Governor::new(&AUTH_GOVERNOR))
-                    .service(change_password::change_password)
-                    .service(totp::setup_totp)
-                    .service(totp::confirm_totp)
-                    .service(totp::disable_totp)
-                    .service(totp::regenerate_recovery_codes),
-            ),
-    )
-    .service(openapi_spec);
+    cfg.service(auth::scope())
+        .service(user::scope())
+        .service(openapi_spec);
 }

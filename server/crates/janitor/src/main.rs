@@ -4,8 +4,8 @@ use tracing_actix_web::TracingLogger;
 
 use iono_core::state::CoreState;
 
+mod routes;
 mod state;
-mod sweep;
 
 use state::AppState;
 
@@ -45,7 +45,7 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .wrap(TracingLogger::default())
             .app_data(state.clone())
-            .service(sweep::sweep)
+            .configure(routes::configure)
     })
     .workers(1)
     .bind((host, port))?

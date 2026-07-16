@@ -1,4 +1,9 @@
-use actix_web::{get, http::header, web, HttpRequest, HttpResponse};
+pub mod raw;
+pub mod raw_with_prefix;
+pub mod view;
+pub mod view_with_prefix;
+
+use actix_web::{http::header, HttpRequest, HttpResponse};
 use chrono::Utc;
 use iono_core::{
     auth::password::verify_password_async,
@@ -15,58 +20,6 @@ use crate::{embed, state::AppState};
 #[derive(Deserialize)]
 pub struct ViewQuery {
     password: Option<String>,
-}
-
-#[get("/{display_name}")]
-pub async fn view_page(
-    state: web::Data<AppState>,
-    path: web::Path<String>,
-    query: web::Query<ViewQuery>,
-) -> ApiResult<HttpResponse> {
-    let display_name = path.into_inner();
-    let file = fetch_file(&state, &display_name).await?;
-    view_page_inner(&state, file, &format!("/raw/{display_name}"), &query).await
-}
-
-#[get("/raw/{display_name}")]
-pub async fn raw_file(
-    state: web::Data<AppState>,
-    path: web::Path<String>,
-    query: web::Query<ViewQuery>,
-    req: HttpRequest,
-) -> ApiResult<HttpResponse> {
-    let display_name = path.into_inner();
-    let file = fetch_file(&state, &display_name).await?;
-    raw_file_inner(&state, file, &query, &req).await
-}
-
-#[get("/{prefix}/{display_name}")]
-pub async fn view_page_with_prefix(
-    state: web::Data<AppState>,
-    path: web::Path<(String, String)>,
-    query: web::Query<ViewQuery>,
-) -> ApiResult<HttpResponse> {
-    let (prefix, display_name) = path.into_inner();
-    let file = fetch_file_with_prefix(&state, &prefix, &display_name).await?;
-    view_page_inner(
-        &state,
-        file,
-        &format!("/{prefix}/raw/{display_name}"),
-        &query,
-    )
-    .await
-}
-
-#[get("/{prefix}/raw/{display_name}")]
-pub async fn raw_file_with_prefix(
-    state: web::Data<AppState>,
-    path: web::Path<(String, String)>,
-    query: web::Query<ViewQuery>,
-    req: HttpRequest,
-) -> ApiResult<HttpResponse> {
-    let (prefix, display_name) = path.into_inner();
-    let file = fetch_file_with_prefix(&state, &prefix, &display_name).await?;
-    raw_file_inner(&state, file, &query, &req).await
 }
 
 async fn view_page_inner(

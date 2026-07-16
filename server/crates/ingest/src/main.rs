@@ -1,9 +1,8 @@
 use actix_multipart::form::MultipartFormConfig;
-use actix_web::{get, http::Method, web, App, HttpServer};
+use actix_web::{http::Method, web, App, HttpServer};
 use tracing_actix_web::TracingLogger;
-use utoipa::OpenApi;
 
-use iono_core::{openapi::BearerSecurity, AppError};
+use iono_core::AppError;
 
 mod auth;
 mod routes;
@@ -11,20 +10,6 @@ mod state;
 
 use iono_core::web::ApiError;
 use state::AppState;
-
-#[derive(OpenApi)]
-#[openapi(
-    info(title = "iono ingest", description = "file uploads"),
-    paths(routes::upload::upload_file),
-    components(schemas(routes::upload::UploadForm)),
-    modifiers(&BearerSecurity)
-)]
-struct ApiDoc;
-
-#[get("/openapi.json")]
-async fn openapi_spec() -> web::Json<utoipa::openapi::OpenApi> {
-    web::Json(ApiDoc::openapi())
-}
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -55,8 +40,7 @@ async fn main() -> std::io::Result<()> {
                         ApiError(AppError::BadRequest(err.to_string())).into()
                     }),
             )
-            .service(routes::upload::upload_file)
-            .service(openapi_spec)
+            .configure(routes::configure)
     })
     .bind((host, port))?
     .run()
