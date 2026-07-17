@@ -1,6 +1,6 @@
+pub mod page;
 pub mod raw;
 pub mod raw_with_prefix;
-pub mod view;
 pub mod view_with_prefix;
 
 use actix_web::{http::header, HttpRequest, HttpResponse};
