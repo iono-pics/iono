@@ -50,11 +50,26 @@ pub async fn login(
         return Err(AppError::Unauthorized.into());
     }
 
-    if user.totp_enabled {
+    let passkey_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM passkeys WHERE user_id = $1")
+        .bind(&user.id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(AppError::from)?;
+
+    if user.totp_enabled || user.passkey_required {
+        let mut methods = Vec::new();
+        if passkey_count > 0 {
+            methods.push("passkey");
+        }
+        if user.totp_enabled {
+            methods.push("totp");
+        }
+
         let mfa_token = jwt::issue_mfa_token(&user.id, state.config.jwt_secret.expose_secret())?;
         return Ok(HttpResponse::Ok().json(serde_json::json!({
             "mfa_required": true,
             "mfa_token": mfa_token,
+            "methods": methods,
         })));
     }
 

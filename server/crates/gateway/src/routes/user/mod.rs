@@ -1,6 +1,7 @@
 pub mod api_keys;
 pub mod change_password;
 pub mod me;
+pub mod passkeys;
 pub mod settings;
 pub mod totp;
 
@@ -15,6 +16,7 @@ pub fn scope() -> impl HttpServiceFactory {
         .service(me::me)
         .service(api_keys::regenerate_apikey)
         .service(settings::update_settings)
+        .service(passkeys::list::list_passkeys)
         .service(
             web::scope("")
                 .wrap(Governor::new(&AUTH_GOVERNOR))
@@ -22,6 +24,10 @@ pub fn scope() -> impl HttpServiceFactory {
                 .service(totp::setup::setup_totp)
                 .service(totp::confirm::confirm_totp)
                 .service(totp::disable::disable_totp)
-                .service(totp::recovery_codes::regenerate_recovery_codes),
+                .service(totp::recovery_codes::regenerate_recovery_codes)
+                .service(passkeys::register_start::register_start)
+                .service(passkeys::register_finish::register_finish)
+                .service(passkeys::remove::remove_passkey)
+                .service(passkeys::require::require_passkey),
         )
 }

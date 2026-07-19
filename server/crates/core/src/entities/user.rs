@@ -13,6 +13,7 @@ pub struct User {
     #[serde(skip_serializing)]
     pub totp_secret: Option<String>,
     pub totp_enabled: bool,
+    pub passkey_required: bool,
     #[serde(skip_serializing)]
     pub token_version: i32,
     pub created_at: DateTime<Utc>,

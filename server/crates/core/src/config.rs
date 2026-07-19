@@ -23,6 +23,9 @@ pub struct Config {
     pub jwt_secret: SecretString,
     pub jwt_access_ttl_minutes: i64,
 
+    pub webauthn_rp_id: String,
+    pub webauthn_rp_origin: String,
+
     pub max_upload_size_bytes: usize,
 }
 
@@ -67,6 +70,9 @@ impl Config {
             jwt_access_ttl_minutes: env_or("JWT_ACCESS_TTL_MINUTES", "1440")
                 .parse()
                 .expect("JWT_ACCESS_TTL_MINUTES malformed"),
+
+            webauthn_rp_id: env_or("WEBAUTHN_RP_ID", "localhost"),
+            webauthn_rp_origin: env_or("WEBAUTHN_RP_ORIGIN", "http://localhost:5173"),
 
             max_upload_size_bytes: env_or("MAX_UPLOAD_SIZE_MB", "10240")
                 .parse::<usize>()

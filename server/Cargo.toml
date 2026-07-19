@@ -62,9 +62,10 @@ rand = "0.10.2"
 argon2 = "0.5"
 jsonwebtoken = "9"
 totp-rs = { version = "5", features = ["otpauth"] }
+webauthn-rs = { version = "0.5", default-features = false, features = ["danger-allow-state-serialisation"] }
 email_address = "0.2"
 validator = { version = "0.20", features = ["derive"] }
-utoipa = { version = "5", features = ["actix_extras"] }
+utoipa = { version = "5", features = ["actix_extras", "chrono"] }
 infer = "0.19.0"
 humansize = "2"
 maud = "0.27"
@@ -77,3 +78,5 @@ image = { version = "0.25", default-features = false, features = [
 
 aws-sdk-s3 = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
+
+openssl = { version = "0.10", features = ["vendored"] }

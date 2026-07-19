@@ -14,6 +14,7 @@ actix-web-httpauth.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
+uuid.workspace = true
 
 thiserror.workspace = true
 
@@ -31,6 +32,7 @@ rand.workspace = true
 argon2.workspace = true
 jsonwebtoken.workspace = true
 totp-rs.workspace = true
+webauthn-rs.workspace = true
 utoipa.workspace = true
 
 dotenvy.workspace = true

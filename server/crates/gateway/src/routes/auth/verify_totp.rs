@@ -43,6 +43,10 @@ pub async fn verify_login_totp(
         .map_err(AppError::from)?
         .ok_or(AppError::Unauthorized)?;
 
+    if user.passkey_required {
+        return Err(AppError::BadRequest("a passkey is required for this account".into()).into());
+    }
+
     match (&body.code, &body.recovery_code) {
         (Some(code), None) => {
             let Some(secret) = user.totp_secret.clone() else {

@@ -24,8 +24,11 @@ secrecy.workspace = true
 email_address.workspace = true
 validator.workspace = true
 utoipa.workspace = true
+webauthn-rs.workspace = true
 
 tracing.workspace = true
 tracing-actix-web.workspace = true
 
 thiserror.workspace = true
+
+openssl.workspace = true

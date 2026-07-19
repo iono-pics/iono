@@ -6,6 +6,7 @@ use iono_core::db;
 mod auth;
 mod routes;
 mod state;
+mod webauthn_sessions;
 
 use state::AppState;
 
@@ -22,7 +23,17 @@ async fn main() -> std::io::Result<()> {
 
     tracing::info!("iono-gateway listening on http://{}:{}", host, port);
 
-    let state = web::Data::new(AppState { db, config });
+    let webauthn = iono_core::auth::webauthn::build_webauthn(
+        &config.webauthn_rp_id,
+        &config.webauthn_rp_origin,
+    )
+    .expect("failed to build webauthn config");
+
+    let state = web::Data::new(AppState {
+        db,
+        config,
+        webauthn,
+    });
 
     HttpServer::new(move || {
         let cors = iono_core::web::cors([

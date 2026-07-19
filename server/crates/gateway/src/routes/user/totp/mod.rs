@@ -23,7 +23,7 @@ pub struct ReauthRequest {
     totp_code: Option<String>,
 }
 
-async fn require_reauth(user: &User, req: &ReauthRequest) -> Result<(), AppError> {
+pub(crate) async fn require_reauth(user: &User, req: &ReauthRequest) -> Result<(), AppError> {
     match (&req.password, &req.totp_code) {
         (Some(password), None) => {
             let Some(hash) = user.password_hash.clone() else {
