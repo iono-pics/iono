@@ -61,7 +61,6 @@ pub async fn sweep(state: web::Data<AppState>, auth: BearerAuth) -> HttpResponse
     HttpResponse::Accepted().json(serde_json::json!({ "status": "sweep started" }))
 }
 
-// TODO: also sweep pastes and short links
 async fn run_sweep(state: &AppState) -> Result<(u64, u64), AppError> {
     let mut deleted: u64 = 0;
     let mut failed: u64 = 0;
@@ -109,6 +108,13 @@ async fn run_sweep(state: &AppState) -> Result<(u64, u64), AppError> {
 
         deleted += deleted_ids.len() as u64;
     }
+
+    let expired_pastes =
+        sqlx::query("DELETE FROM pastes WHERE expires_at IS NOT NULL AND expires_at < now()")
+            .execute(&state.core.db)
+            .await?
+            .rows_affected();
+    deleted += expired_pastes;
 
     Ok((deleted, failed))
 }

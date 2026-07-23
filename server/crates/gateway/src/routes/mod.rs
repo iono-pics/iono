@@ -30,6 +30,9 @@ use utoipa::OpenApi;
         user::passkeys::list::list_passkeys,
         user::passkeys::remove::remove_passkey,
         user::passkeys::require::require_passkey,
+        user::pastes::create::create_paste,
+        user::pastes::list::list_pastes,
+        user::pastes::delete::delete_paste,
     ),
     components(schemas(
         auth::signup::SignupRequest,
@@ -48,6 +51,8 @@ use utoipa::OpenApi;
         user::passkeys::register_finish::FinishRegisterPasskeyRequest,
         user::passkeys::list::PasskeySummary,
         user::passkeys::require::RequirePasskeyRequest,
+        user::pastes::create::CreatePasteRequest,
+        user::pastes::list::PasteSummary,
     )),
     modifiers(&BearerSecurity)
 )]
