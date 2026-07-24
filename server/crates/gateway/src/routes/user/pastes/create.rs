@@ -45,6 +45,8 @@ pub async fn create_paste(
     let body = body.into_inner();
     validate(&body)?;
 
+    iono_core::quota::check_storage_quota(&state.db, &user.0.id, body.content.len() as i64).await?;
+
     let settings =
         sqlx::query_as::<_, UserSettings>("SELECT * FROM user_settings WHERE user_id = $1")
             .bind(&user.0.id)

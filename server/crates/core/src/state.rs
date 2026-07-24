@@ -21,3 +21,13 @@ impl CoreState {
         Self { storage, db }
     }
 }
+
+pub trait HasDb {
+    fn db(&self) -> &PgPool;
+}
+
+impl HasDb for CoreState {
+    fn db(&self) -> &PgPool {
+        &self.db
+    }
+}

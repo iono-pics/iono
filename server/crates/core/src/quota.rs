@@ -20,8 +20,11 @@ pub async fn plan_for_user(pool: &PgPool, user_id: &str) -> Result<Plan, AppErro
 pub async fn storage_used_bytes(pool: &PgPool, user_id: &str) -> Result<i64, AppError> {
     let used: Option<i64> = sqlx::query_scalar(
         r#"
-        SELECT SUM(size_bytes)::bigint FROM files
-        WHERE user_id = $1 AND (expires_at IS NULL OR expires_at > now())
+        SELECT
+            (SELECT COALESCE(SUM(size_bytes), 0) FROM files
+                WHERE user_id = $1 AND (expires_at IS NULL OR expires_at > now()))
+            + (SELECT COALESCE(SUM(octet_length(content)), 0) FROM pastes
+                WHERE user_id = $1 AND (expires_at IS NULL OR expires_at > now()))
         "#,
     )
     .bind(user_id)
@@ -29,6 +32,23 @@ pub async fn storage_used_bytes(pool: &PgPool, user_id: &str) -> Result<i64, App
     .await?;
 
     Ok(used.unwrap_or(0)) // TODO: handle this better
+}
+
+pub async fn check_storage_quota(
+    pool: &PgPool,
+    user_id: &str,
+    additional_bytes: i64,
+) -> Result<(), AppError> {
+    let plan = plan_for_user(pool, user_id).await?;
+
+    let used = storage_used_bytes(pool, user_id).await?;
+    if used + additional_bytes > plan.storage_quota_bytes {
+        return Err(AppError::PaymentRequired(
+            "storage quota exceeded, consider upgrading your plan.".to_owned(),
+        ));
+    }
+
+    Ok(())
 }
 
 pub async fn check_before_upload(
@@ -44,12 +64,5 @@ pub async fn check_before_upload(
         ));
     }
 
-    let used = storage_used_bytes(pool, user_id).await?;
-    if used + additional_bytes > plan.storage_quota_bytes {
-        return Err(AppError::PaymentRequired(
-            "storage quota exceeded, consider upgrading your plan.".to_owned(),
-        ));
-    }
-
-    Ok(())
+    check_storage_quota(pool, user_id, additional_bytes).await
 }
