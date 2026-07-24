@@ -11,6 +11,7 @@ use crate::{auth::ApiKeyAuth, state::AppState};
 pub enum DestinationKind {
     File,
     Paste,
+    Link,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -87,6 +88,20 @@ fn build_config(
                 "URL": "{json:url}",
             }),
         ),
+        DestinationKind::Link => (
+            "iono-link.sxcu",
+            json!({
+                "Version": "21.0.0",
+                "Name": "iono (links)",
+                "DestinationType": "URLShortener",
+                "RequestMethod": "POST",
+                "RequestURL": format!("{ingest_url}/links"),
+                "Headers": { "Authorization": authorization },
+                "Body": "JSON",
+                "Data": "{\"target_url\":\"{input}\"}",
+                "URL": "{json:url}",
+            }),
+        ),
     }
 }
 
@@ -123,6 +138,23 @@ mod tests {
         let data: serde_json::Value =
             serde_json::from_str(config["Data"].as_str().unwrap()).unwrap();
         assert_eq!(data["content"], "{input}");
+    }
+
+    #[test]
+    fn link_config_shortens_the_input_url() {
+        let (filename, config) = build_config(
+            &DestinationKind::Link,
+            "iono_secret",
+            "https://up.iono.pics",
+        );
+
+        assert_eq!(filename, "iono-link.sxcu");
+        assert_eq!(config["DestinationType"], "URLShortener");
+        assert_eq!(config["RequestURL"], "https://up.iono.pics/links");
+
+        let data: serde_json::Value =
+            serde_json::from_str(config["Data"].as_str().unwrap()).unwrap();
+        assert_eq!(data["target_url"], "{input}");
     }
 
     #[test]

@@ -1,5 +1,6 @@
 pub mod api_keys;
 pub mod change_password;
+pub mod links;
 pub mod me;
 pub mod passkeys;
 pub mod pastes;
@@ -21,6 +22,8 @@ pub fn scope() -> impl HttpServiceFactory {
         .service(passkeys::list::list_passkeys)
         .service(pastes::list::list_pastes)
         .service(pastes::delete::delete_paste)
+        .service(links::list::list_short_links)
+        .service(links::delete::delete_short_link)
         .service(sharex::sharex_config)
         .service(
             web::scope("")

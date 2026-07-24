@@ -32,6 +32,8 @@ use utoipa::OpenApi;
         user::passkeys::require::require_passkey,
         user::pastes::list::list_pastes,
         user::pastes::delete::delete_paste,
+        user::links::list::list_short_links,
+        user::links::delete::delete_short_link,
         user::sharex::sharex_config,
     ),
     components(schemas(
@@ -52,6 +54,7 @@ use utoipa::OpenApi;
         user::passkeys::list::PasskeySummary,
         user::passkeys::require::RequirePasskeyRequest,
         user::pastes::list::PasteSummary,
+        user::links::list::ShortLinkSummary,
         user::sharex::DestinationKind,
     )),
     modifiers(&BearerSecurity)

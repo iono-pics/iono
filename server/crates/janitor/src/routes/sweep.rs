@@ -116,5 +116,12 @@ async fn run_sweep(state: &AppState) -> Result<(u64, u64), AppError> {
             .rows_affected();
     deleted += expired_pastes;
 
+    let expired_links =
+        sqlx::query("DELETE FROM short_links WHERE expires_at IS NOT NULL AND expires_at < now()")
+            .execute(&state.core.db)
+            .await?
+            .rows_affected();
+    deleted += expired_links;
+
     Ok((deleted, failed))
 }
