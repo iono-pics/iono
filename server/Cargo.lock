@@ -2399,6 +2399,7 @@ dependencies = [
  "actix-web",
  "chrono",
  "iono-core",
+ "serde",
  "serde_json",
  "sqlx",
  "tokio",

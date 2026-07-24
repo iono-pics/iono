@@ -39,7 +39,6 @@ pub async fn sharex_config(
     let (filename, config) = build_config(
         &query.into_inner().r#type,
         &api_key,
-        &state.config.public_api_url,
         &state.config.public_ingest_url,
     );
 
@@ -55,7 +54,6 @@ pub async fn sharex_config(
 fn build_config(
     kind: &DestinationKind,
     api_key: &str,
-    api_url: &str,
     ingest_url: &str,
 ) -> (&'static str, serde_json::Value) {
     let authorization = format!("Bearer {api_key}");
@@ -82,7 +80,7 @@ fn build_config(
                 "Name": "iono (pastes)",
                 "DestinationType": "TextUploader",
                 "RequestMethod": "POST",
-                "RequestURL": format!("{api_url}/user/pastes"),
+                "RequestURL": format!("{ingest_url}/pastes"),
                 "Headers": { "Authorization": authorization },
                 "Body": "JSON",
                 "Data": "{\"content\":\"{input}\"}",
@@ -101,7 +99,6 @@ mod tests {
         let (filename, config) = build_config(
             &DestinationKind::File,
             "iono_secret",
-            "https://api.iono.pics",
             "https://up.iono.pics",
         );
 
@@ -116,12 +113,11 @@ mod tests {
         let (filename, config) = build_config(
             &DestinationKind::Paste,
             "iono_secret",
-            "https://api.iono.pics",
             "https://up.iono.pics",
         );
 
         assert_eq!(filename, "iono-paste.sxcu");
-        assert_eq!(config["RequestURL"], "https://api.iono.pics/user/pastes");
+        assert_eq!(config["RequestURL"], "https://up.iono.pics/pastes");
         assert_eq!(config["Body"], "JSON");
 
         let data: serde_json::Value =

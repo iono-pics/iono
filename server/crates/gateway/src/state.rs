@@ -1,4 +1,8 @@
-use iono_core::{state::HasDb, Config};
+use iono_core::{
+    state::{HasDb, HasJwtSecret},
+    Config,
+};
+use secrecy::SecretString;
 use sqlx::PgPool;
 use webauthn_rs::Webauthn;
 
@@ -11,5 +15,11 @@ pub struct AppState {
 impl HasDb for AppState {
     fn db(&self) -> &PgPool {
         &self.db
+    }
+}
+
+impl HasJwtSecret for AppState {
+    fn jwt_secret(&self) -> &SecretString {
+        &self.config.jwt_secret
     }
 }

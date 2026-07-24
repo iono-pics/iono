@@ -1,7 +1,9 @@
 use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 
+use crate::entities::User;
 use crate::error::AppError;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -41,6 +43,23 @@ pub fn verify_access_token(token: &str, secret: &str) -> Result<Claims, AppError
     )
     .map(|data| data.claims)
     .map_err(|_| AppError::Unauthorized)
+}
+
+pub async fn authenticate(db: &PgPool, secret: &str, access_token: &str) -> Result<User, AppError> {
+    let claims = verify_access_token(access_token, secret)?;
+
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+        .bind(&claims.sub)
+        .fetch_optional(db)
+        .await
+        .map_err(AppError::from)?
+        .ok_or(AppError::Unauthorized)?;
+
+    if claims.ver != user.token_version {
+        return Err(AppError::Unauthorized);
+    }
+
+    Ok(user)
 }
 
 const MFA_TOKEN_PURPOSE: &str = "mfa_pending";

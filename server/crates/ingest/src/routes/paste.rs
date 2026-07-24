@@ -27,7 +27,7 @@ pub struct CreatePasteRequest {
 
 #[utoipa::path(
     post,
-    path = "/user/pastes",
+    path = "/pastes",
     request_body = CreatePasteRequest,
     security(("bearer_auth" = [])),
     responses(

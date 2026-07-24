@@ -9,7 +9,6 @@ interface Env {
 	SERVER_CONTAINER: DurableObjectNamespace<ServerContainer>;
 	API_HOST: string;
 	INGEST_HOST: string;
-	PUBLIC_API_URL: string;
 	PUBLIC_INGEST_URL: string;
 	DATABASE_URL: string;
 	S3_BUCKET: string;
@@ -27,7 +26,6 @@ export class ServerContainer extends Container<Env> {
 	requiredPorts = [GATEWAY_PORT, INGEST_PORT, VIEWER_PORT];
 	envVars = {
 		DATABASE_URL: this.env.DATABASE_URL,
-		PUBLIC_API_URL: this.env.PUBLIC_API_URL,
 		PUBLIC_INGEST_URL: this.env.PUBLIC_INGEST_URL,
 		S3_BUCKET: this.env.S3_BUCKET,
 		S3_REGION: this.env.S3_REGION,

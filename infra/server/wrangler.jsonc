@@ -18,7 +18,6 @@
 	"vars": {
 		"API_HOST": "api.iono.pics",
 		"INGEST_HOST": "up.iono.pics",
-		"PUBLIC_API_URL": "https://api.iono.pics",
 		"PUBLIC_INGEST_URL": "https://up.iono.pics",
 		"RUST_LOG": "info"
 	},

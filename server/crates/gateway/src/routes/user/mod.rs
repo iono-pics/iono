@@ -20,7 +20,6 @@ pub fn scope() -> impl HttpServiceFactory {
         .service(settings::update_settings)
         .service(passkeys::list::list_passkeys)
         .service(pastes::list::list_pastes)
-        .service(pastes::create::create_paste)
         .service(pastes::delete::delete_paste)
         .service(sharex::sharex_config)
         .service(
