@@ -1,7 +1,7 @@
 use actix_web::{delete, web, HttpResponse};
 use iono_core::{web::ApiResult, AppError};
 
-use crate::{auth::JwtUser, state::AppState};
+use crate::{auth::AuthedUser, state::AppState};
 
 #[utoipa::path(
     delete,
@@ -13,7 +13,7 @@ use crate::{auth::JwtUser, state::AppState};
 #[delete("/pastes/{id}")]
 pub async fn delete_paste(
     state: web::Data<AppState>,
-    user: JwtUser,
+    user: AuthedUser,
     path: web::Path<String>,
 ) -> ApiResult<HttpResponse> {
     let deleted = sqlx::query_scalar::<_, String>(

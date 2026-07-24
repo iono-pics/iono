@@ -4,7 +4,7 @@ use iono_core::{entities::Paste, web::ApiResult, AppError};
 use serde::Serialize;
 use utoipa::ToSchema;
 
-use crate::{auth::JwtUser, state::AppState};
+use crate::{auth::AuthedUser, state::AppState};
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PasteSummary {
@@ -36,7 +36,7 @@ impl From<Paste> for PasteSummary {
     responses((status = 200, description = "the caller's pastes", body = [PasteSummary]))
 )]
 #[get("/pastes")]
-pub async fn list_pastes(state: web::Data<AppState>, user: JwtUser) -> ApiResult<HttpResponse> {
+pub async fn list_pastes(state: web::Data<AppState>, user: AuthedUser) -> ApiResult<HttpResponse> {
     let pastes = sqlx::query_as::<_, Paste>(
         "SELECT * FROM pastes WHERE user_id = $1 ORDER BY created_at DESC",
     )
