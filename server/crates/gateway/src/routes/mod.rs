@@ -33,6 +33,7 @@ use utoipa::OpenApi;
         user::pastes::create::create_paste,
         user::pastes::list::list_pastes,
         user::pastes::delete::delete_paste,
+        user::sharex::sharex_config,
     ),
     components(schemas(
         auth::signup::SignupRequest,
@@ -53,6 +54,7 @@ use utoipa::OpenApi;
         user::passkeys::require::RequirePasskeyRequest,
         user::pastes::create::CreatePasteRequest,
         user::pastes::list::PasteSummary,
+        user::sharex::DestinationKind,
     )),
     modifiers(&BearerSecurity)
 )]

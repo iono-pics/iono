@@ -26,6 +26,9 @@ pub struct Config {
     pub webauthn_rp_id: String,
     pub webauthn_rp_origin: String,
 
+    pub public_api_url: String,
+    pub public_ingest_url: String,
+
     pub max_upload_size_bytes: usize,
 }
 
@@ -74,6 +77,9 @@ impl Config {
             webauthn_rp_id: env_or("WEBAUTHN_RP_ID", "localhost"),
             webauthn_rp_origin: env_or("WEBAUTHN_RP_ORIGIN", "http://localhost:5173"),
 
+            public_api_url: env_url_or("PUBLIC_API_URL", "http://localhost:8080"),
+            public_ingest_url: env_url_or("PUBLIC_INGEST_URL", "http://localhost:8081"),
+
             max_upload_size_bytes: env_or("MAX_UPLOAD_SIZE_MB", "10240")
                 .parse::<usize>()
                 .expect("MAX_UPLOAD_SIZE_MB malformed")
@@ -89,4 +95,8 @@ fn env_or(key: &str, default: &str) -> String {
 
 fn env_secret_or(key: &str, default: &str) -> SecretString {
     SecretString::from(env_or(key, default))
+}
+
+fn env_url_or(key: &str, default: &str) -> String {
+    env_or(key, default).trim_end_matches('/').to_string()
 }

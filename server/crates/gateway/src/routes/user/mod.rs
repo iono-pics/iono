@@ -4,6 +4,7 @@ pub mod me;
 pub mod passkeys;
 pub mod pastes;
 pub mod settings;
+pub mod sharex;
 pub mod totp;
 
 use actix_governor::Governor;
@@ -21,6 +22,7 @@ pub fn scope() -> impl HttpServiceFactory {
         .service(pastes::list::list_pastes)
         .service(pastes::create::create_paste)
         .service(pastes::delete::delete_paste)
+        .service(sharex::sharex_config)
         .service(
             web::scope("")
                 .wrap(Governor::new(&AUTH_GOVERNOR))

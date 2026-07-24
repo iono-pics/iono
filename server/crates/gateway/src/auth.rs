@@ -66,3 +66,25 @@ impl FromRequest for AuthedUser {
         })
     }
 }
+
+pub struct ApiKeyAuth(pub String);
+
+impl FromRequest for ApiKeyAuth {
+    type Error = ApiError;
+    type Future = Pin<Box<dyn Future<Output = Result<Self, Self::Error>>>>;
+
+    fn from_request(req: &HttpRequest, payload: &mut Payload) -> Self::Future {
+        let fut = state_and_bearer::<AppState>(req, payload);
+        Box::pin(async move {
+            let (state, bearer) = fut.await?;
+            let api_key = bearer.token().to_string();
+
+            if !api_key.starts_with(token::API_KEY_PREFIX) {
+                return Err(ApiError(AppError::Unauthorized));
+            }
+
+            api_key::authenticate(&state.db, &api_key).await?;
+            Ok(ApiKeyAuth(api_key))
+        })
+    }
+}
