@@ -27,10 +27,12 @@ const INVISIBLE_ALPHABET: &[char] = &[
     '\u{2063}', '\u{2064}',
 ];
 
+pub const API_KEY_PREFIX: &str = "iono_";
+
 pub fn generate_api_token() -> String {
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
-    format!("iono_{}", hex::encode(bytes))
+    format!("{API_KEY_PREFIX}{}", hex::encode(bytes))
 }
 
 pub fn generate_display_name(length: usize, style: &DisplayNameStyle) -> String {

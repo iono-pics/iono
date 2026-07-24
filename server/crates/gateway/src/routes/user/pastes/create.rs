@@ -10,7 +10,7 @@ use serde::Deserialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::{auth::JwtUser, state::AppState};
+use crate::{auth::AuthedUser, state::AppState};
 
 const MAX_CONTENT_LENGTH: usize = 1024 * 1024;
 const MAX_TITLE_LENGTH: usize = 256;
@@ -39,7 +39,7 @@ pub struct CreatePasteRequest {
 #[post("/pastes")]
 pub async fn create_paste(
     state: web::Data<AppState>,
-    user: JwtUser,
+    user: AuthedUser,
     body: web::Json<CreatePasteRequest>,
 ) -> ApiResult<HttpResponse> {
     let body = body.into_inner();

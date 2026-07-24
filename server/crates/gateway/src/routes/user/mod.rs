@@ -19,6 +19,8 @@ pub fn scope() -> impl HttpServiceFactory {
         .service(settings::update_settings)
         .service(passkeys::list::list_passkeys)
         .service(pastes::list::list_pastes)
+        .service(pastes::create::create_paste)
+        .service(pastes::delete::delete_paste)
         .service(
             web::scope("")
                 .wrap(Governor::new(&AUTH_GOVERNOR))
@@ -30,8 +32,6 @@ pub fn scope() -> impl HttpServiceFactory {
                 .service(passkeys::register_start::register_start)
                 .service(passkeys::register_finish::register_finish)
                 .service(passkeys::remove::remove_passkey)
-                .service(passkeys::require::require_passkey)
-                .service(pastes::create::create_paste)
-                .service(pastes::delete::delete_paste),
+                .service(passkeys::require::require_passkey),
         )
 }
