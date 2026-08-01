@@ -111,10 +111,5 @@ pub async fn list_files(
         .await
         .map_err(AppError::from)?;
 
-    Ok(HttpResponse::Ok().json(
-        files
-            .into_iter()
-            .map(FileSummary::from)
-            .collect::<Vec<_>>(),
-    ))
+    Ok(HttpResponse::Ok().json(files.into_iter().map(FileSummary::from).collect::<Vec<_>>()))
 }

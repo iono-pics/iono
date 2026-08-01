@@ -4,6 +4,15 @@ export function rustChecks(source: Directory): Container {
   return dag
     .container()
     .from("rust:1-slim")
+    .withExec(["apt-get", "update"])
+    .withExec([
+      "apt-get",
+      "install",
+      "-y",
+      "--no-install-recommends",
+      "libssl-dev",
+      "pkg-config",
+    ])
     .withExec(["rustup", "component", "add", "rustfmt", "clippy"])
     .withMountedCache("/usr/local/cargo/registry", dag.cacheVolume("cargo-registry"))
     .withDirectory("/app", source)
