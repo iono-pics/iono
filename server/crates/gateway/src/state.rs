@@ -1,13 +1,16 @@
 use iono_core::{
     state::{HasDb, HasJwtSecret},
+    storage::Storage,
     Config,
 };
 use secrecy::SecretString;
 use sqlx::PgPool;
+use std::sync::Arc;
 use webauthn_rs::Webauthn;
 
 pub struct AppState {
     pub db: PgPool,
+    pub storage: Arc<dyn Storage>,
     pub config: Config,
     pub webauthn: Webauthn,
 }

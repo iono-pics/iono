@@ -1,7 +1,7 @@
 use actix_web::{http::Method, web, App, HttpServer};
 use tracing_actix_web::TracingLogger;
 
-use iono_core::db;
+use iono_core::{db, storage};
 
 mod auth;
 mod routes;
@@ -18,6 +18,10 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("failed to connect to database");
 
+    let storage = storage::build(&config)
+        .await
+        .expect("failed to initialize storage backend");
+
     let host = config.host.clone();
     let port = config.gateway_port;
 
@@ -31,6 +35,7 @@ async fn main() -> std::io::Result<()> {
 
     let state = web::Data::new(AppState {
         db,
+        storage,
         config,
         webauthn,
     });

@@ -78,5 +78,3 @@ image = { version = "0.25", default-features = false, features = [
 
 aws-sdk-s3 = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
-
-openssl = { version = "0.10", features = ["vendored"] }

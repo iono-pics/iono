@@ -1,0 +1,3 @@
+[target.x86_64-pc-windows-msvc]
+# stops the 1 million pdb missing linker warnings
+rustflags = ["-C", "link-arg=/ignore:4099"]
