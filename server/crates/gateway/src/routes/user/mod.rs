@@ -1,5 +1,6 @@
 pub mod api_keys;
 pub mod change_password;
+pub mod files;
 pub mod links;
 pub mod me;
 pub mod passkeys;
@@ -20,6 +21,7 @@ pub fn scope() -> impl HttpServiceFactory {
         .service(api_keys::regenerate_apikey)
         .service(settings::update_settings)
         .service(passkeys::list::list_passkeys)
+        .service(files::list::list_files)
         .service(pastes::list::list_pastes)
         .service(pastes::delete::delete_paste)
         .service(links::list::list_short_links)
