@@ -31,8 +31,10 @@ pub fn scope() -> impl HttpServiceFactory {
         .service(folders::delete::delete_folder)
         .service(pastes::list::list_pastes)
         .service(pastes::delete::delete_paste)
+        .service(pastes::update::update_paste)
         .service(links::list::list_short_links)
         .service(links::delete::delete_short_link)
+        .service(links::update::update_short_link)
         .service(sharex::sharex_config)
         .service(
             web::scope("")

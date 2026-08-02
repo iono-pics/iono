@@ -39,8 +39,10 @@ use utoipa::OpenApi;
         user::folders::delete::delete_folder,
         user::pastes::list::list_pastes,
         user::pastes::delete::delete_paste,
+        user::pastes::update::update_paste,
         user::links::list::list_short_links,
         user::links::delete::delete_short_link,
+        user::links::update::update_short_link,
         user::sharex::sharex_config,
     ),
     components(schemas(
@@ -66,7 +68,9 @@ use utoipa::OpenApi;
         user::folders::create::CreateFolderRequest,
         user::folders::update::UpdateFolderRequest,
         user::pastes::list::PasteSummary,
+        user::pastes::update::UpdatePasteRequest,
         user::links::list::ShortLinkSummary,
+        user::links::update::UpdateShortLinkRequest,
         user::sharex::DestinationKind,
     )),
     modifiers(&BearerSecurity)
