@@ -2,6 +2,7 @@ pub mod api_keys;
 pub mod change_password;
 pub mod delete_account;
 pub mod embeds;
+pub mod export;
 pub mod files;
 pub mod folders;
 pub mod links;
@@ -25,6 +26,7 @@ pub fn scope() -> impl HttpServiceFactory {
         .service(me::me)
         .service(api_keys::regenerate_apikey)
         .service(storage::get_storage)
+        .service(export::export_data)
         .service(settings::update::update_settings)
         .service(settings::domains::get_domain_settings)
         .service(settings::domains::update_domain_settings)
