@@ -1,35 +1,31 @@
 use actix_web::{patch, web, HttpResponse};
 use chrono::{DateTime, Utc};
-use iono_core::{auth::password::hash_password_async, entities::Paste, web::ApiResult, AppError};
-use serde::{Deserialize, Deserializer};
+use iono_core::{
+    auth::password::hash_password_async,
+    entities::Paste,
+    validators,
+    web::{ApiResult, OptionExt, Patch},
+    AppError,
+};
+use serde::Deserialize;
 use utoipa::ToSchema;
 
 use crate::{auth::AuthedUser, routes::user::pastes::list::PasteSummary, state::AppState};
 
 const MAX_CONTENT_LENGTH: usize = 1024 * 1024;
-const MAX_TITLE_LENGTH: usize = 256;
-const MAX_SYNTAX_LENGTH: usize = 64;
-const MAX_PASSWORD_LENGTH: usize = 256;
 
 #[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(default)]
 pub struct UpdatePasteRequest {
-    #[serde(default, deserialize_with = "deserialize_some")]
-    title: Option<Option<String>>,
+    #[schema(value_type = Option<String>)]
+    title: Patch<String>,
     content: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_some")]
-    syntax: Option<Option<String>>,
-    #[serde(default, deserialize_with = "deserialize_some")]
-    password: Option<Option<String>>,
-    #[serde(default, deserialize_with = "deserialize_some")]
-    expires_at: Option<Option<DateTime<Utc>>>,
-}
-
-fn deserialize_some<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    T: Deserialize<'de>,
-    D: Deserializer<'de>,
-{
-    T::deserialize(deserializer).map(Some)
+    #[schema(value_type = Option<String>)]
+    syntax: Patch<String>,
+    #[schema(value_type = Option<String>)]
+    password: Patch<String>,
+    #[schema(value_type = Option<DateTime<Utc>>)]
+    expires_at: Patch<DateTime<Utc>>,
 }
 
 #[utoipa::path(
@@ -56,11 +52,11 @@ pub async fn update_paste(
     let body = body.into_inner();
     validate(&body)?;
 
-    if body.title.is_none()
+    if !body.title.is_provided()
         && body.content.is_none()
-        && body.syntax.is_none()
-        && body.password.is_none()
-        && body.expires_at.is_none()
+        && !body.syntax.is_provided()
+        && !body.password.is_provided()
+        && !body.expires_at.is_provided()
     {
         return Err(AppError::BadRequest("no fields to update".into()).into());
     }
@@ -68,18 +64,15 @@ pub async fn update_paste(
     let paste_id = path.into_inner();
 
     if let Some(new_content) = &body.content {
-        let old_len: Option<i64> = sqlx::query_scalar(
+        let old_len: i64 = sqlx::query_scalar(
             "SELECT octet_length(content) FROM pastes WHERE id = $1 AND user_id = $2",
         )
         .bind(&paste_id)
         .bind(&user.0.id)
         .fetch_optional(&state.db)
         .await
-        .map_err(AppError::from)?;
-
-        let Some(old_len) = old_len else {
-            return Err(AppError::NotFound.into());
-        };
+        .map_err(AppError::from)?
+        .ok_or_not_found()?;
 
         let delta = new_content.len() as i64 - old_len;
         if delta > 0 {
@@ -87,17 +80,11 @@ pub async fn update_paste(
         }
     }
 
-    let title_provided = body.title.is_some();
-    let title_value = body.title.flatten();
-
-    let syntax_provided = body.syntax.is_some();
-    let syntax_value = body.syntax.flatten();
-
-    let expires_provided = body.expires_at.is_some();
-    let expires_value = body.expires_at.flatten();
-
-    let password_provided = body.password.is_some();
-    let password_hash: Option<String> = match body.password.flatten() {
+    let (title_provided, title_value) = body.title.split();
+    let (syntax_provided, syntax_value) = body.syntax.split();
+    let (expires_provided, expires_value) = body.expires_at.split();
+    let (password_provided, password_plain) = body.password.split();
+    let password_hash: Option<String> = match password_plain {
         Some(pw) => Some(hash_password_async(pw).await?),
         None => None,
     };
@@ -129,13 +116,11 @@ pub async fn update_paste(
     .await
     .map_err(AppError::from)?;
 
-    let Some(paste) = updated else {
-        return Err(AppError::NotFound.into());
-    };
+    let paste = updated.ok_or_not_found()?;
 
     let content_or_password_changed = body.content.is_some() || password_provided;
-    if content_or_password_changed {
-        if let Some(url) = paste_url(&state, &user.0.id, &paste.key).await? {
+    if content_or_password_changed && state.cloudflare.is_configured() {
+        if let Some(url) = iono_core::urls::paste_url(&state.db, &user.0.id, &paste.key).await? {
             let cf = state.cloudflare.clone();
             let paste_id = paste.id.clone();
             tokio::spawn(async move {
@@ -149,29 +134,6 @@ pub async fn update_paste(
     Ok(HttpResponse::Ok().json(PasteSummary::from(paste)))
 }
 
-async fn paste_url(state: &AppState, user_id: &str, key: &str) -> Result<Option<String>, AppError> {
-    if !state.cloudflare.is_configured() {
-        return Ok(None);
-    }
-    let domain: Option<(String, Option<String>)> = sqlx::query_as(
-        r#"
-        SELECT d.name, ds.pastes_path_prefix
-        FROM domain_settings ds
-        INNER JOIN domains d ON d.id = ds.pastes_domain_id
-        WHERE ds.user_id = $1
-        "#,
-    )
-    .bind(user_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(AppError::from)?;
-
-    Ok(domain.map(|(host, prefix)| {
-        let prefix = prefix.map(|p| format!("{p}/")).unwrap_or_default();
-        format!("https://{host}/p/{prefix}{key}")
-    }))
-}
-
 fn validate(body: &UpdatePasteRequest) -> Result<(), AppError> {
     if let Some(content) = &body.content {
         if content.is_empty() {
@@ -182,36 +144,20 @@ fn validate(body: &UpdatePasteRequest) -> Result<(), AppError> {
         }
     }
 
-    if let Some(Some(title)) = &body.title {
-        if title.chars().count() > MAX_TITLE_LENGTH {
-            return Err(AppError::BadRequest(format!(
-                "title must be at most {MAX_TITLE_LENGTH} characters"
-            )));
-        }
+    if let Some(title) = body.title.as_set() {
+        validators::text_length(title, 256, "title")?;
     }
 
-    if let Some(Some(syntax)) = &body.syntax {
-        if syntax.chars().count() > MAX_SYNTAX_LENGTH {
-            return Err(AppError::BadRequest(format!(
-                "syntax must be at most {MAX_SYNTAX_LENGTH} characters"
-            )));
-        }
+    if let Some(syntax) = body.syntax.as_set() {
+        validators::text_length(syntax, 64, "syntax")?;
     }
 
-    if let Some(Some(password)) = &body.password {
-        if password.is_empty() || password.chars().count() > MAX_PASSWORD_LENGTH {
-            return Err(AppError::BadRequest(format!(
-                "password must be 1-{MAX_PASSWORD_LENGTH} characters, or null to clear"
-            )));
-        }
+    if let Some(password) = body.password.as_set() {
+        validators::password(password, 256)?;
     }
 
-    if let Some(Some(at)) = body.expires_at {
-        if at <= Utc::now() {
-            return Err(AppError::BadRequest(
-                "expires_at must be in the future".into(),
-            ));
-        }
+    if let Some(at) = body.expires_at.as_set() {
+        validators::future_datetime(*at)?;
     }
 
     Ok(())

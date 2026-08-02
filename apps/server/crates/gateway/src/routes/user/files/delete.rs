@@ -1,5 +1,8 @@
 use actix_web::{delete, web, HttpResponse};
-use iono_core::{web::ApiResult, AppError};
+use iono_core::{
+    web::{ApiResult, OptionExt},
+    AppError,
+};
 
 use crate::{auth::AuthedUser, state::AppState};
 
@@ -28,11 +31,8 @@ pub async fn delete_file(
     .bind(&user.0.id)
     .fetch_optional(&state.db)
     .await
-    .map_err(AppError::from)?;
-
-    let Some(s3_key) = s3_key else {
-        return Err(AppError::NotFound.into());
-    };
+    .map_err(AppError::from)?
+    .ok_or_not_found()?;
 
     if let Err(e) = state.storage.delete(&s3_key).await {
         tracing::warn!(

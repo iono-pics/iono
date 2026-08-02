@@ -1,5 +1,8 @@
 use actix_web::{delete, web, HttpResponse};
-use iono_core::{web::ApiResult, AppError};
+use iono_core::{
+    web::{ApiResult, OptionExt},
+    AppError,
+};
 use serde::Deserialize;
 
 use crate::{auth::AuthedUser, state::AppState};
@@ -72,10 +75,7 @@ pub async fn delete_folder(
     .await
     .map_err(AppError::from)?;
 
-    if deleted.is_none() {
-        tx.rollback().await.map_err(AppError::from)?;
-        return Err(AppError::NotFound.into());
-    }
+    deleted.ok_or_not_found()?;
 
     tx.commit().await.map_err(AppError::from)?;
 

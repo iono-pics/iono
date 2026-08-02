@@ -1,30 +1,27 @@
 use actix_web::{patch, web, HttpResponse};
-use iono_core::{entities::Folder, web::ApiResult, AppError};
-use serde::{Deserialize, Deserializer};
+use iono_core::{
+    entities::Folder,
+    web::{ApiResult, MapDbError, OptionExt, Patch},
+    AppError,
+};
+use serde::Deserialize;
 use utoipa::ToSchema;
 use validator::{Validate, ValidationError};
 
 use crate::{auth::AuthedUser, routes::user::folders::FolderSummary, state::AppState};
 
 #[derive(Debug, Default, Deserialize, Validate, ToSchema)]
+#[serde(default)]
 pub struct UpdateFolderRequest {
     #[validate(
         length(min = 1, max = 64, message = "must be 1-64 characters"),
         custom(function = "validate_folder_name")
     )]
     name: Option<String>,
-    /// 'null' moves folder to root, a folder id puts it under that folder
-    /// and omitting this field leaves the parent unchanged
-    #[serde(default, deserialize_with = "deserialize_some")]
-    parent_id: Option<Option<String>>,
-}
-
-fn deserialize_some<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    T: Deserialize<'de>,
-    D: Deserializer<'de>,
-{
-    T::deserialize(deserializer).map(Some)
+    /// `null` moves to the root; a folder id moves it under that folder;
+    /// omit to leave the parent unchanged.
+    #[schema(value_type = Option<String>)]
+    parent_id: Patch<String>,
 }
 
 fn validate_folder_name(value: &str) -> Result<(), ValidationError> {
@@ -65,13 +62,12 @@ pub async fn update_folder(
 
     let body = body.into_inner();
 
-    if body.name.is_none() && body.parent_id.is_none() {
+    if body.name.is_none() && !body.parent_id.is_provided() {
         return Err(AppError::BadRequest("no fields to update".into()).into());
     }
 
     let folder_id = path.into_inner();
-    let parent_provided = body.parent_id.is_some();
-    let new_parent = body.parent_id.clone().flatten();
+    let (parent_provided, new_parent) = body.parent_id.split();
 
     if let Some(ref new_parent_id) = new_parent {
         if new_parent_id == &folder_id {
@@ -98,23 +94,14 @@ pub async fn update_folder(
     .bind(&user.0.id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| match &e {
-        sqlx::Error::Database(db_err)
-            if db_err.kind() == sqlx::error::ErrorKind::UniqueViolation =>
-        {
-            AppError::Conflict("a folder with that name already exists in this parent".into())
-        }
-        sqlx::Error::Database(db_err)
-            if db_err.kind() == sqlx::error::ErrorKind::ForeignKeyViolation =>
-        {
-            AppError::NotFound
-        }
-        _ => AppError::from(e),
-    })?;
+    .map_err(
+        MapDbError::new()
+            .on_unique_conflict("a folder with that name already exists in this parent")
+            .on_foreign_key_not_found()
+            .build(),
+    )?;
 
-    let Some(folder) = updated else {
-        return Err(AppError::NotFound.into());
-    };
+    let folder = updated.ok_or_not_found()?;
 
     Ok(HttpResponse::Ok().json(FolderSummary::from(folder)))
 }

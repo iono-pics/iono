@@ -1,13 +1,11 @@
 use actix_web::{post, web, HttpResponse};
 use chrono::{Duration, Utc};
-use iono_core::{auth::token, entities::UserSettings, web::ApiResult, AppError};
+use iono_core::{auth::token, entities::UserSettings, validators, web::ApiResult, AppError};
 use serde::Deserialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{auth::AuthedUser, state::AppState};
-
-const MAX_TARGET_URL_LENGTH: usize = 2048; // nax len allowed in search bar
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateShortLinkRequest {
@@ -105,15 +103,5 @@ pub async fn create_short_link(
 }
 
 fn validate(target_url: &str) -> Result<(), AppError> {
-    if target_url.len() > MAX_TARGET_URL_LENGTH {
-        return Err(AppError::BadRequest(
-            "target url must be at most 2048 characters".into(),
-        ));
-    }
-    if !target_url.starts_with("http://") && !target_url.starts_with("https://") {
-        return Err(AppError::BadRequest(
-            "target url must start with http:// or https://".into(),
-        ));
-    }
-    Ok(())
+    validators::http_url(target_url, 2048)
 }

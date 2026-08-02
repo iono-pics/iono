@@ -1,15 +1,15 @@
 use actix_web::{get, web, HttpResponse};
 use chrono::{DateTime, Utc};
-use iono_core::{entities::File, web::ApiResult, AppError};
+use iono_core::{
+    entities::File,
+    web::{ApiResult, Page},
+    AppError,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::QueryBuilder;
 use utoipa::ToSchema;
-use validator::Validate;
 
 use crate::{auth::AuthedUser, state::AppState};
-
-const DEFAULT_LIMIT: i64 = 50;
-const MAX_LIMIT: i64 = 200;
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct FileSummary {
@@ -40,15 +40,13 @@ impl From<File> for FileSummary {
     }
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize)]
 pub struct ListFilesQuery {
     folder_id: Option<String>,
     #[serde(default)]
     favourites_only: bool,
-    #[validate(range(min = 1, max = 200, message = "must be between 1 and 200"))]
-    limit: Option<i64>,
-    #[validate(range(min = 0, message = "must be non-negative"))]
-    offset: Option<i64>,
+    #[serde(flatten)]
+    page: Page,
 }
 
 #[utoipa::path(
@@ -73,13 +71,8 @@ pub async fn list_files(
     user: AuthedUser,
     query: web::Query<ListFilesQuery>,
 ) -> ApiResult<HttpResponse> {
-    query
-        .validate()
-        .map_err(|e| AppError::BadRequest(e.to_string()))?;
-
     let query = query.into_inner();
-    let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-    let offset = query.offset.unwrap_or(0);
+    let (limit, offset) = query.page.resolve(50, 200);
 
     let mut sql: QueryBuilder<sqlx::Postgres> =
         QueryBuilder::new("SELECT * FROM files WHERE user_id = ");

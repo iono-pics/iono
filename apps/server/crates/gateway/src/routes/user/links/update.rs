@@ -1,26 +1,22 @@
 use actix_web::{patch, web, HttpResponse};
 use chrono::{DateTime, Utc};
-use iono_core::{entities::ShortLink, web::ApiResult, AppError};
-use serde::{Deserialize, Deserializer};
+use iono_core::{
+    entities::ShortLink,
+    validators,
+    web::{ApiResult, OptionExt, Patch},
+    AppError,
+};
+use serde::Deserialize;
 use utoipa::ToSchema;
 
 use crate::{auth::AuthedUser, routes::user::links::list::ShortLinkSummary, state::AppState};
 
-const MAX_TARGET_URL_LENGTH: usize = 2048;
-
 #[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(default)]
 pub struct UpdateShortLinkRequest {
     target_url: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_some")]
-    expires_at: Option<Option<DateTime<Utc>>>,
-}
-
-fn deserialize_some<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    T: Deserialize<'de>,
-    D: Deserializer<'de>,
-{
-    T::deserialize(deserializer).map(Some)
+    #[schema(value_type = Option<DateTime<Utc>>)]
+    expires_at: Patch<DateTime<Utc>>,
 }
 
 #[utoipa::path(
@@ -45,18 +41,13 @@ pub async fn update_short_link(
 ) -> ApiResult<HttpResponse> {
     let body = body.into_inner();
     let target_url = body.target_url.map(|u| u.trim().to_string());
-    validate(
-        target_url.as_deref(),
-        body.expires_at.as_ref().and_then(|v| v.as_ref()),
-    )?;
+    validate(target_url.as_deref(), body.expires_at.as_set())?;
 
-    if target_url.is_none() && body.expires_at.is_none() {
+    if target_url.is_none() && !body.expires_at.is_provided() {
         return Err(AppError::BadRequest("no fields to update".into()).into());
     }
 
-    let expires_provided = body.expires_at.is_some();
-    let expires_value = body.expires_at.flatten();
-
+    let (expires_provided, expires_value) = body.expires_at.split();
     let link_id = path.into_inner();
 
     let updated = sqlx::query_as::<_, ShortLink>(
@@ -77,33 +68,18 @@ pub async fn update_short_link(
     .await
     .map_err(AppError::from)?;
 
-    let Some(link) = updated else {
-        return Err(AppError::NotFound.into());
-    };
+    let link = updated.ok_or_not_found()?;
 
     Ok(HttpResponse::Ok().json(ShortLinkSummary::from(link)))
 }
 
 fn validate(target_url: Option<&str>, expires_at: Option<&DateTime<Utc>>) -> Result<(), AppError> {
     if let Some(url) = target_url {
-        if url.len() > MAX_TARGET_URL_LENGTH {
-            return Err(AppError::BadRequest(format!(
-                "target_url must be at most {MAX_TARGET_URL_LENGTH} characters"
-            )));
-        }
-        if !url.starts_with("http://") && !url.starts_with("https://") {
-            return Err(AppError::BadRequest(
-                "target_url must start with http:// or https://".into(),
-            ));
-        }
+        validators::http_url(url, 2048)?;
     }
 
     if let Some(at) = expires_at {
-        if *at <= Utc::now() {
-            return Err(AppError::BadRequest(
-                "expires_at must be in the future".into(),
-            ));
-        }
+        validators::future_datetime(*at)?;
     }
 
     Ok(())

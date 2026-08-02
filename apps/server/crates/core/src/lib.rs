@@ -11,6 +11,8 @@ pub mod quota;
 pub mod state;
 pub mod storage;
 pub mod telemetry;
+pub mod urls;
+pub mod validators;
 pub mod web;
 
 pub use config::Config;

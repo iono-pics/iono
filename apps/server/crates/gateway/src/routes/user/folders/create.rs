@@ -1,5 +1,9 @@
 use actix_web::{post, web, HttpResponse};
-use iono_core::{entities::Folder, web::ApiResult, AppError};
+use iono_core::{
+    entities::Folder,
+    web::{ApiResult, MapDbError},
+    AppError,
+};
 use serde::Deserialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -67,19 +71,12 @@ pub async fn create_folder(
     .bind(&body.name)
     .fetch_one(&state.db)
     .await
-    .map_err(|e| match &e {
-        sqlx::Error::Database(db_err)
-            if db_err.kind() == sqlx::error::ErrorKind::UniqueViolation =>
-        {
-            AppError::Conflict("a folder with that name already exists in this parent".into())
-        }
-        sqlx::Error::Database(db_err)
-            if db_err.kind() == sqlx::error::ErrorKind::ForeignKeyViolation =>
-        {
-            AppError::NotFound
-        }
-        _ => AppError::from(e),
-    })?;
+    .map_err(
+        MapDbError::new()
+            .on_unique_conflict("a folder with that name already exists in this parent")
+            .on_foreign_key_not_found()
+            .build(),
+    )?;
 
     Ok(HttpResponse::Created().json(FolderSummary::from(folder)))
 }

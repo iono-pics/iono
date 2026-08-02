@@ -3,6 +3,7 @@ use chrono::{Duration, Utc};
 use iono_core::{
     auth::{password::hash_password_async, token},
     entities::UserSettings,
+    validators,
     web::{append_password_query, ApiResult},
     AppError,
 };
@@ -13,9 +14,6 @@ use uuid::Uuid;
 use crate::{auth::AuthedUser, state::AppState};
 
 const MAX_CONTENT_LENGTH: usize = 1024 * 1024;
-const MAX_TITLE_LENGTH: usize = 256;
-const MAX_SYNTAX_LENGTH: usize = 64;
-const MAX_PASSWORD_LENGTH: usize = 256;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreatePasteRequest {
@@ -140,32 +138,14 @@ fn validate(body: &CreatePasteRequest) -> Result<(), AppError> {
             "paste content must be at most 1 MiB".into(),
         ));
     }
-    if body
-        .title
-        .as_ref()
-        .is_some_and(|title| title.chars().count() > MAX_TITLE_LENGTH)
-    {
-        return Err(AppError::BadRequest(
-            "paste title must be at most 256 characters".into(),
-        ));
+    if let Some(title) = &body.title {
+        validators::text_length(title, 256, "paste title")?;
     }
-    if body
-        .syntax
-        .as_ref()
-        .is_some_and(|syntax| syntax.chars().count() > MAX_SYNTAX_LENGTH)
-    {
-        return Err(AppError::BadRequest(
-            "paste syntax must be at most 64 characters".into(),
-        ));
+    if let Some(syntax) = &body.syntax {
+        validators::text_length(syntax, 64, "paste syntax")?;
     }
-    if body
-        .password
-        .as_ref()
-        .is_some_and(|password| password.chars().count() > MAX_PASSWORD_LENGTH)
-    {
-        return Err(AppError::BadRequest(
-            "paste password must be at most 256 characters".into(),
-        ));
+    if let Some(password) = body.password.as_deref().filter(|p| !p.is_empty()) {
+        validators::password(password, 256)?;
     }
     Ok(())
 }

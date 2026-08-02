@@ -1,15 +1,20 @@
 use actix_web::{patch, web, HttpResponse};
 use chrono::{DateTime, Utc};
-use iono_core::{auth::password::hash_password_async, entities::File, web::ApiResult, AppError};
-use serde::{Deserialize, Deserializer};
+use iono_core::{
+    auth::password::hash_password_async,
+    entities::File,
+    validators,
+    web::{ApiResult, MapDbError, OptionExt, Patch},
+    AppError,
+};
+use serde::Deserialize;
 use utoipa::ToSchema;
 use validator::{Validate, ValidationError};
 
 use crate::{auth::AuthedUser, routes::user::files::list::FileSummary, state::AppState};
 
-const MAX_PASSWORD_LEN: usize = 256;
-
 #[derive(Debug, Default, Deserialize, Validate, ToSchema)]
+#[serde(default)]
 pub struct UpdateFileRequest {
     #[validate(
         length(min = 1, max = 128, message = "must be 1-128 characters"),
@@ -17,20 +22,12 @@ pub struct UpdateFileRequest {
     )]
     display_name: Option<String>,
     is_favourite: Option<bool>,
-    #[serde(default, deserialize_with = "deserialize_some")]
-    folder_id: Option<Option<String>>,
-    #[serde(default, deserialize_with = "deserialize_some")]
-    expires_at: Option<Option<DateTime<Utc>>>,
-    #[serde(default, deserialize_with = "deserialize_some")]
-    password: Option<Option<String>>,
-}
-
-fn deserialize_some<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    T: Deserialize<'de>,
-    D: Deserializer<'de>,
-{
-    T::deserialize(deserializer).map(Some)
+    #[schema(value_type = Option<String>)]
+    folder_id: Patch<String>,
+    #[schema(value_type = Option<DateTime<Utc>>)]
+    expires_at: Patch<DateTime<Utc>>,
+    #[schema(value_type = Option<String>)]
+    password: Patch<String>,
 }
 
 fn validate_display_name(value: &str) -> Result<(), ValidationError> {
@@ -55,7 +52,7 @@ fn validate_display_name(value: &str) -> Result<(), ValidationError> {
         (status = 400, description = "validation failed"),
         (status = 401, description = "missing or invalid token"),
         (status = 404, description = "no such file"),
-        (status = 409, description = "display name already in use"),
+        (status = 409, description = "that name is already in use"),
     )
 )]
 #[patch("/files/{id}")]
@@ -72,36 +69,25 @@ pub async fn update_file(
 
     if body.display_name.is_none()
         && body.is_favourite.is_none()
-        && body.folder_id.is_none()
-        && body.expires_at.is_none()
-        && body.password.is_none()
+        && !body.folder_id.is_provided()
+        && !body.expires_at.is_provided()
+        && !body.password.is_provided()
     {
         return Err(AppError::BadRequest("no fields to update".into()).into());
     }
 
-    if let Some(Some(at)) = body.expires_at {
-        if at <= Utc::now() {
-            return Err(AppError::BadRequest("expires_at must be in the future".into()).into());
-        }
+    if let Some(at) = body.expires_at.as_set() {
+        validators::future_datetime(*at)?;
     }
 
-    if let Some(Some(pw)) = &body.password {
-        if pw.is_empty() || pw.len() > MAX_PASSWORD_LEN {
-            return Err(AppError::BadRequest(format!(
-                "password must be 1-{MAX_PASSWORD_LEN} characters, or null to clear"
-            ))
-            .into());
-        }
+    if let Some(pw) = body.password.as_set() {
+        validators::password(pw, 256)?;
     }
 
-    let expires_provided = body.expires_at.is_some();
-    let expires_value = body.expires_at.flatten();
-
-    let folder_provided = body.folder_id.is_some();
-    let folder_value = body.folder_id.flatten();
-
-    let password_provided = body.password.is_some();
-    let password_hash: Option<String> = match body.password.flatten() {
+    let (folder_provided, folder_value) = body.folder_id.split();
+    let (expires_provided, expires_value) = body.expires_at.split();
+    let (password_provided, password_plain) = body.password.split();
+    let password_hash: Option<String> = match password_plain {
         Some(pw) => Some(hash_password_async(pw).await?),
         None => None,
     };
@@ -143,31 +129,23 @@ pub async fn update_file(
     .bind(&user.0.id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| match &e {
-        sqlx::Error::Database(db_err)
-            if db_err.kind() == sqlx::error::ErrorKind::UniqueViolation =>
-        {
-            AppError::Conflict("display_name already in use".into())
-        }
-        sqlx::Error::Database(db_err)
-            if db_err.kind() == sqlx::error::ErrorKind::ForeignKeyViolation =>
-        {
-            AppError::NotFound
-        }
-        _ => AppError::from(e),
-    })?;
+    .map_err(
+        MapDbError::new()
+            .on_unique_conflict("that name is already in use")
+            .on_foreign_key_not_found()
+            .build(),
+    )?;
 
-    let Some(file) = updated else {
-        return Err(AppError::NotFound.into());
-    };
+    let file = updated.ok_or_not_found()?;
 
     let renamed_from = old_display_name.filter(|old| old != &file.display_name);
-    if password_provided || renamed_from.is_some() {
-        let mut display_names = vec![file.display_name.clone()];
-        if let Some(old) = renamed_from {
+    if (password_provided || renamed_from.is_some()) && state.cloudflare.is_configured() {
+        let mut display_names: Vec<&str> = vec![&file.display_name];
+        if let Some(old) = renamed_from.as_deref() {
             display_names.push(old);
         }
-        if let Some(urls) = file_urls(&state, &user.0.id, &display_names).await? {
+        let urls = iono_core::urls::file_urls(&state.db, &user.0.id, &display_names).await?;
+        if !urls.is_empty() {
             let cf = state.cloudflare.clone();
             let file_id = file.id.clone();
             tokio::spawn(async move {
@@ -179,38 +157,4 @@ pub async fn update_file(
     }
 
     Ok(HttpResponse::Ok().json(FileSummary::from(file)))
-}
-
-async fn file_urls(
-    state: &AppState,
-    user_id: &str,
-    display_names: &[String],
-) -> Result<Option<Vec<String>>, AppError> {
-    if !state.cloudflare.is_configured() || display_names.is_empty() {
-        return Ok(None);
-    }
-    let domain: Option<(String, Option<String>)> = sqlx::query_as(
-        r#"
-        SELECT d.name, ds.files_path_prefix
-        FROM domain_settings ds
-        INNER JOIN domains d ON d.id = ds.files_domain_id
-        WHERE ds.user_id = $1
-        "#,
-    )
-    .bind(user_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(AppError::from)?;
-
-    let Some((host, prefix)) = domain else {
-        return Ok(None);
-    };
-    let prefix = prefix.map(|p| format!("{p}/")).unwrap_or_default();
-
-    let mut urls = Vec::with_capacity(display_names.len() * 2);
-    for name in display_names {
-        urls.push(format!("https://{host}/{prefix}{name}"));
-        urls.push(format!("https://{host}/{prefix}raw/{name}"));
-    }
-    Ok(Some(urls))
 }
