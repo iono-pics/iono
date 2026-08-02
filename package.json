@@ -3,10 +3,31 @@
 	"private": true,
 	"version": "0.0.1",
 	"type": "module",
+	"workspaces": [
+		"apps/*",
+		"apps/*/infra",
+		"packages/*",
+		"tools/*"
+	],
 	"scripts": {
-		"prepare": "husky"
+		"prepare": "husky",
+		"web": "yarn workspace web dev",
+		"docs": "yarn workspace docs dev",
+		"server": "yarn server:build && concurrently -k -n gw,in,vw,jn -c blue,green,yellow,magenta \"yarn server:gateway\" \"yarn server:ingest\" \"yarn server:viewer\" \"yarn server:janitor\"",
+		"server:build": "cargo build --manifest-path apps/server/Cargo.toml -p iono-gateway -p iono-ingest -p iono-viewer -p iono-janitor",
+		"server:gateway": "cargo run --manifest-path apps/server/Cargo.toml -p iono-gateway",
+		"server:ingest": "cargo run --manifest-path apps/server/Cargo.toml -p iono-ingest",
+		"server:viewer": "cargo run --manifest-path apps/server/Cargo.toml -p iono-viewer",
+		"server:janitor": "cargo run --manifest-path apps/server/Cargo.toml -p iono-janitor",
+		"build:web": "yarn workspace web build",
+		"build:docs": "yarn workspace docs build",
+		"build:server": "cargo build --manifest-path apps/server/Cargo.toml --release",
+		"deploy:server": "yarn workspace iono-server-worker deploy",
+		"deploy:web": "yarn workspace iono-web-deploy deploy",
+		"deploy:docs": "yarn workspace iono-docs-deploy deploy"
 	},
 	"devDependencies": {
+		"concurrently": "^10.0.4",
 		"husky": "^9",
 		"lint-staged": "^17.0.8"
 	},

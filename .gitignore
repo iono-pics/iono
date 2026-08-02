@@ -12,3 +12,8 @@ node_modules/
 
 # Cloudflare
 .wrangler/
+
+# Environment
+.env
+.env.local
+.env.*.local

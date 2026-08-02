@@ -1,0 +1,32 @@
+[package]
+name = "iono-gateway"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+iono-core.workspace = true
+
+actix-web.workspace = true
+actix-governor.workspace = true
+
+tokio.workspace = true
+sqlx.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+secrecy.workspace = true
+email_address.workspace = true
+validator.workspace = true
+utoipa.workspace = true
+webauthn-rs.workspace = true
+
+tracing.workspace = true
+tracing-actix-web.workspace = true
+
+thiserror.workspace = true

@@ -1,0 +1,12 @@
+{
+	"name": "iono-web-deploy",
+	"private": true,
+	"version": "0.0.1",
+	"type": "module",
+	"scripts": {
+		"deploy": "wrangler deploy"
+	},
+	"devDependencies": {
+		"wrangler": "4.107.1"
+	}
+}
