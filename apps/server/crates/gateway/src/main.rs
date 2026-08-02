@@ -4,6 +4,7 @@ use tracing_actix_web::TracingLogger;
 use std::sync::Arc;
 
 use iono_core::{cloudflare::CloudflareClient, db, storage};
+use secrecy::ExposeSecret;
 
 mod auth;
 mod routes;
@@ -40,10 +41,16 @@ async fn main() -> std::io::Result<()> {
         config.cloudflare_api_token.clone(),
     ));
 
+    let stripe = config
+        .stripe_api_key
+        .as_ref()
+        .map(|k| stripe::Client::new(k.expose_secret()));
+
     let state = web::Data::new(AppState {
         db,
         storage,
         cloudflare,
+        stripe,
         config,
         webauthn,
     });

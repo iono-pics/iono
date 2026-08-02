@@ -19,6 +19,7 @@
 		"API_HOST": "api.iono.pics",
 		"INGEST_HOST": "up.iono.pics",
 		"PUBLIC_INGEST_URL": "https://up.iono.pics",
+		"STRIPE_PORTAL_RETURN_URL": "https://iono.pics/settings",
 		"RUST_LOG": "info"
 	},
 	"routes": [

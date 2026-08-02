@@ -34,6 +34,7 @@ use utoipa::OpenApi;
         user::change_password::change_password,
         user::delete_account::delete_account,
         user::redeem::redeem_code,
+        user::billing::portal::create_portal_session,
         user::totp::setup::setup_totp,
         user::totp::confirm::confirm_totp,
         user::totp::disable::disable_totp,

@@ -32,6 +32,9 @@ pub struct Config {
 
     pub cloudflare_zone_id: Option<String>,
     pub cloudflare_api_token: Option<SecretString>,
+
+    pub stripe_api_key: Option<SecretString>,
+    pub stripe_portal_return_url: Option<String>,
 }
 
 impl Config {
@@ -94,6 +97,15 @@ impl Config {
                 .ok()
                 .filter(|s| !s.is_empty())
                 .map(SecretString::from),
+
+            stripe_api_key: env::var("STRIPE_API_KEY")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(SecretString::from),
+            stripe_portal_return_url: env::var("STRIPE_PORTAL_RETURN_URL")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.trim_end_matches('/').to_string()),
         }
     }
 }

@@ -1,4 +1,5 @@
 pub mod api_keys;
+pub mod billing;
 pub mod change_password;
 pub mod delete_account;
 pub mod embeds;
@@ -57,6 +58,7 @@ pub fn scope() -> impl HttpServiceFactory {
                 .service(change_password::change_password)
                 .service(delete_account::delete_account)
                 .service(redeem::redeem_code)
+                .service(billing::portal::create_portal_session)
                 .service(totp::setup::setup_totp)
                 .service(totp::confirm::confirm_totp)
                 .service(totp::disable::disable_totp)

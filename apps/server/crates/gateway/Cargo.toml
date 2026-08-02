@@ -26,6 +26,8 @@ validator.workspace = true
 utoipa.workspace = true
 webauthn-rs.workspace = true
 
+async-stripe.workspace = true
+
 tracing.workspace = true
 tracing-actix-web.workspace = true
 

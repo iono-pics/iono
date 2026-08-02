@@ -13,6 +13,7 @@ pub struct AppState {
     pub db: PgPool,
     pub storage: Arc<dyn Storage>,
     pub cloudflare: Arc<CloudflareClient>,
+    pub stripe: Option<stripe::Client>,
     pub config: Config,
     pub webauthn: Webauthn,
 }
