@@ -1,6 +1,7 @@
 pub mod login;
 pub mod passkey_login_finish;
 pub mod passkey_login_start;
+pub mod restore;
 pub mod signup;
 pub mod verify_passkey_finish;
 pub mod verify_passkey_start;
@@ -22,4 +23,5 @@ pub fn scope() -> impl HttpServiceFactory {
         .service(verify_passkey_finish::verify_passkey_finish)
         .service(passkey_login_start::passkey_login_start)
         .service(passkey_login_finish::passkey_login_finish)
+        .service(restore::restore)
 }

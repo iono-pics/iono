@@ -48,7 +48,13 @@ async fn render_paste(paste: Paste, query: &PasteQuery) -> ApiResult<HttpRespons
 
 async fn fetch_paste(state: &AppState, key: &str) -> Result<Paste, AppError> {
     sqlx::query_as::<_, Paste>(
-        "SELECT * FROM pastes WHERE key = $1 AND (expires_at IS NULL OR expires_at > now())",
+        r#"
+        SELECT p.* FROM pastes p
+        INNER JOIN users u ON u.id = p.user_id
+        WHERE p.key = $1
+          AND (p.expires_at IS NULL OR p.expires_at > now())
+          AND u.deleted_at IS NULL
+        "#,
     )
     .bind(key)
     .fetch_optional(&state.db)
@@ -66,9 +72,11 @@ async fn fetch_paste_with_prefix(
         r#"
         SELECT p.* FROM pastes p
         INNER JOIN domain_settings ds ON ds.user_id = p.user_id
+        INNER JOIN users u ON u.id = p.user_id
         WHERE p.key = $1
-        AND ds.pastes_path_prefix = $2
-        AND (p.expires_at IS NULL OR p.expires_at > now())
+          AND ds.pastes_path_prefix = $2
+          AND (p.expires_at IS NULL OR p.expires_at > now())
+          AND u.deleted_at IS NULL
         "#,
     )
     .bind(key)

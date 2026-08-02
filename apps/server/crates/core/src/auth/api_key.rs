@@ -19,6 +19,7 @@ pub async fn authenticate(db: &PgPool, api_token: &str) -> Result<User, AppError
         SELECT u.* FROM users u
         INNER JOIN api_keys k ON k.user_id = u.id
         WHERE k.token_hash = $1
+          AND u.deleted_at IS NULL
         "#,
     )
     .bind(&hash)

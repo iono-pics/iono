@@ -20,6 +20,9 @@ pub enum AppError {
     #[error("range not satisfiable")]
     RangeNotSatisfiable,
 
+    #[error("gone: {0}")]
+    Gone(String),
+
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 

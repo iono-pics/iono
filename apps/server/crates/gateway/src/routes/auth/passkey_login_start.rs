@@ -36,6 +36,10 @@ pub async fn passkey_login_start(
         .map_err(AppError::from)?
         .ok_or(AppError::Unauthorized)?;
 
+    if user.deleted_at.is_some() {
+        return Err(AppError::Unauthorized.into());
+    }
+
     let passkeys =
         sqlx::query_as::<_, PasskeyCredential>("SELECT * FROM passkeys WHERE user_id = $1")
             .bind(&user.id)

@@ -114,7 +114,13 @@ fn cache_control(file: &File) -> header::CacheControl {
 
 async fn fetch_file(state: &AppState, display_name: &str) -> Result<File, AppError> {
     sqlx::query_as::<_, File>(
-        "SELECT * FROM files WHERE display_name = $1 AND (expires_at IS NULL OR expires_at > now())",
+        r#"
+        SELECT f.* FROM files f
+        INNER JOIN users u ON u.id = f.user_id
+        WHERE f.display_name = $1
+          AND (f.expires_at IS NULL OR f.expires_at > now())
+          AND u.deleted_at IS NULL
+        "#,
     )
     .bind(display_name)
     .fetch_optional(&state.db)
@@ -132,9 +138,11 @@ async fn fetch_file_with_prefix(
         r#"
         SELECT f.* FROM files f
         INNER JOIN domain_settings ds ON ds.user_id = f.user_id
+        INNER JOIN users u ON u.id = f.user_id
         WHERE f.display_name = $1
-        AND ds.files_path_prefix = $2
-        AND (f.expires_at IS NULL OR f.expires_at > now())
+          AND ds.files_path_prefix = $2
+          AND (f.expires_at IS NULL OR f.expires_at > now())
+          AND u.deleted_at IS NULL
         "#,
     )
     .bind(display_name)

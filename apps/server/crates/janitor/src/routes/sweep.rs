@@ -1,6 +1,6 @@
 use actix_web::{post, web, HttpResponse};
 use actix_web_httpauth::extractors::bearer::BearerAuth;
-use iono_core::AppError;
+use iono_core::{entities::RECOVERY_WINDOW_DAYS, AppError};
 use secrecy::ExposeSecret;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -123,5 +123,86 @@ async fn run_sweep(state: &AppState) -> Result<(u64, u64), AppError> {
             .rows_affected();
     deleted += expired_links;
 
+    let (purged_users, purged_files_failed) = purge_expired_deletions(state).await?;
+    deleted += purged_users;
+    failed += purged_files_failed;
+
     Ok((deleted, failed))
+}
+
+async fn purge_expired_deletions(state: &AppState) -> Result<(u64, u64), AppError> {
+    let expired_user_ids: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT id FROM users
+        WHERE deleted_at IS NOT NULL
+          AND deleted_at < now() - make_interval(days => $1)
+          AND (email IS NOT NULL OR password_hash IS NOT NULL)
+        LIMIT $2
+        "#,
+    )
+    .bind(RECOVERY_WINDOW_DAYS as i32)
+    .bind(BATCH_SIZE)
+    .fetch_all(&state.core.db)
+    .await?;
+
+    let mut purged: u64 = 0;
+    let mut failed: u64 = 0;
+
+    for user_id in expired_user_ids {
+        let s3_keys: Vec<String> =
+            sqlx::query_scalar("SELECT original_name FROM files WHERE user_id = $1")
+                .bind(&user_id)
+                .fetch_all(&state.core.db)
+                .await?;
+
+        let mut tx = state.core.db.begin().await?;
+        for query in [
+            "DELETE FROM files WHERE user_id = $1",
+            "DELETE FROM folders WHERE user_id = $1",
+            "DELETE FROM pastes WHERE user_id = $1",
+            "DELETE FROM short_links WHERE user_id = $1",
+            "DELETE FROM api_keys WHERE user_id = $1",
+            "DELETE FROM passkeys WHERE user_id = $1",
+            "DELETE FROM embed_presets WHERE user_id = $1",
+            "DELETE FROM embed_settings WHERE user_id = $1",
+            "DELETE FROM domain_settings WHERE user_id = $1",
+            "DELETE FROM user_settings WHERE user_id = $1",
+            "DELETE FROM totp_recovery_codes WHERE user_id = $1",
+            "DELETE FROM oauth_accounts WHERE user_id = $1",
+            "DELETE FROM subscriptions WHERE user_id = $1",
+        ] {
+            sqlx::query(query).bind(&user_id).execute(&mut *tx).await?;
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE users SET
+                email         = NULL,
+                password_hash = NULL,
+                totp_secret   = NULL,
+                totp_enabled  = false,
+                token_version = token_version + 1
+            WHERE id = $1
+            "#,
+        )
+        .bind(&user_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        if !s3_keys.is_empty() {
+            let deleted_keys: HashSet<String> = state
+                .core
+                .storage
+                .delete_many(&s3_keys)
+                .await?
+                .into_iter()
+                .collect();
+            failed += (s3_keys.len() - deleted_keys.len()) as u64;
+        }
+        purged += 1;
+    }
+
+    Ok((purged, failed))
 }

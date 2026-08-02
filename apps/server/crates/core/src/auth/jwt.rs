@@ -59,6 +59,10 @@ pub async fn authenticate(db: &PgPool, secret: &str, access_token: &str) -> Resu
         return Err(AppError::Unauthorized);
     }
 
+    if user.deleted_at.is_some() {
+        return Err(AppError::Unauthorized);
+    }
+
     Ok(user)
 }
 
@@ -98,6 +102,40 @@ pub fn verify_mfa_token(token: &str, secret: &str) -> Result<MfaClaims, AppError
     .map_err(|_| AppError::Unauthorized)?;
 
     if claims.purpose != MFA_TOKEN_PURPOSE {
+        return Err(AppError::Unauthorized);
+    }
+
+    Ok(claims)
+}
+
+const RESTORE_TOKEN_PURPOSE: &str = "restore_account";
+
+pub fn issue_restore_token(user_id: &str, secret: &str) -> Result<String, AppError> {
+    let now = Utc::now();
+    let claims = MfaClaims {
+        sub: user_id.to_string(),
+        iat: now.timestamp() as usize,
+        exp: (now + Duration::minutes(15)).timestamp() as usize,
+        purpose: RESTORE_TOKEN_PURPOSE.to_string(),
+    };
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(secret.as_bytes()),
+    )
+    .map_err(|e| AppError::internal_from("jwt encode failed", e))
+}
+
+pub fn verify_restore_token(token: &str, secret: &str) -> Result<MfaClaims, AppError> {
+    let claims = decode::<MfaClaims>(
+        token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &Validation::default(),
+    )
+    .map(|data| data.claims)
+    .map_err(|_| AppError::Unauthorized)?;
+
+    if claims.purpose != RESTORE_TOKEN_PURPOSE {
         return Err(AppError::Unauthorized);
     }
 

@@ -87,6 +87,7 @@ impl ResponseError for ApiError {
             AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::PaymentRequired(_) => StatusCode::PAYMENT_REQUIRED,
             AppError::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
+            AppError::Gone(_) => StatusCode::GONE,
             AppError::Database(_) | AppError::Io(_) | AppError::Internal { .. } => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }

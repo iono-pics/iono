@@ -78,6 +78,8 @@ impl CloudflareClient {
     }
 
     pub async fn purge_urls(&self, urls: Vec<String>) -> Result<(), ApiError> {
+        const CHUNK: usize = 30;
+
         if urls.is_empty() {
             return Ok(());
         }
@@ -88,11 +90,14 @@ impl CloudflareClient {
             );
             return Ok(());
         };
-        let endpoint = PurgeCache {
-            zone_id,
-            files: urls,
-        };
-        self.request(&endpoint).await?;
+
+        for chunk in urls.chunks(CHUNK) {
+            let endpoint = PurgeCache {
+                zone_id,
+                files: chunk.to_vec(),
+            };
+            self.request(&endpoint).await?;
+        }
         Ok(())
     }
 

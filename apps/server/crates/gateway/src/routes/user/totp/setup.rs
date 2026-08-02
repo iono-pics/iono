@@ -19,7 +19,8 @@ pub async fn setup_totp(state: web::Data<AppState>, user: JwtUser) -> ApiResult<
         return Err(AppError::Conflict("totp is already enabled".into()).into());
     }
 
-    let setup = totp::generate_totp_setup(&user.0.email)?;
+    let label = user.0.email.as_deref().unwrap_or(&user.0.username);
+    let setup = totp::generate_totp_setup(label)?;
 
     sqlx::query("UPDATE users SET totp_secret = $1 WHERE id = $2")
         .bind(&setup.secret_base32)
