@@ -1,7 +1,9 @@
 use actix_web::{http::Method, web, App, HttpServer};
 use tracing_actix_web::TracingLogger;
 
-use iono_core::{db, storage};
+use std::sync::Arc;
+
+use iono_core::{cloudflare::CloudflareClient, db, storage};
 
 mod auth;
 mod routes;
@@ -33,9 +35,15 @@ async fn main() -> std::io::Result<()> {
     )
     .expect("failed to build webauthn config");
 
+    let cloudflare = Arc::new(CloudflareClient::new(
+        config.cloudflare_zone_id.clone(),
+        config.cloudflare_api_token.clone(),
+    ));
+
     let state = web::Data::new(AppState {
         db,
         storage,
+        cloudflare,
         config,
         webauthn,
     });

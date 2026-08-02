@@ -91,15 +91,19 @@ async fn unlock(paste: &Paste, password: Option<&str>) -> Result<bool, AppError>
 }
 
 fn cache_control(paste: &Paste) -> String {
-    const YEAR: i64 = 31_536_000;
+    // browsers use max-age which must be short so mutations propagate quickly
+    // cloudflare uses s-maxage which can be long since we can purge it on mutation
+    const BROWSER_MAX_AGE: i64 = 300;
+    const EDGE_MAX_AGE: i64 = 31_536_000;
     if paste.password_hash.is_some() {
         return "no-store".into();
     }
-    let max_age = paste
+    let cap = paste
         .expires_at
-        .map(|expires| (expires - Utc::now()).num_seconds().clamp(0, YEAR))
-        .unwrap_or(YEAR);
-    format!("public, max-age={max_age}, immutable")
+        .map(|expires| (expires - Utc::now()).num_seconds().clamp(0, EDGE_MAX_AGE))
+        .unwrap_or(EDGE_MAX_AGE);
+    let browser = BROWSER_MAX_AGE.min(cap);
+    format!("public, max-age={browser}, s-maxage={cap}")
 }
 
 fn render_html(paste: &Paste) -> String {

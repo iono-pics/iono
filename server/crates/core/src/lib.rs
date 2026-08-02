@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod bootstrap;
+pub mod cloudflare;
 pub mod config;
 pub mod content_type;
 pub mod db;

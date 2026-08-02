@@ -108,6 +108,17 @@ pub async fn update_file(
 
     let file_id = path.into_inner();
 
+    let old_display_name: Option<String> = if body.display_name.is_some() {
+        sqlx::query_scalar("SELECT display_name FROM files WHERE id = $1 AND user_id = $2")
+            .bind(&file_id)
+            .bind(&user.0.id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(AppError::from)?
+    } else {
+        None
+    };
+
     let updated = sqlx::query_as::<_, File>(
         r#"
         UPDATE files SET
@@ -150,5 +161,56 @@ pub async fn update_file(
         return Err(AppError::NotFound.into());
     };
 
+    let renamed_from = old_display_name.filter(|old| old != &file.display_name);
+    if password_provided || renamed_from.is_some() {
+        let mut display_names = vec![file.display_name.clone()];
+        if let Some(old) = renamed_from {
+            display_names.push(old);
+        }
+        if let Some(urls) = file_urls(&state, &user.0.id, &display_names).await? {
+            let cf = state.cloudflare.clone();
+            let file_id = file.id.clone();
+            tokio::spawn(async move {
+                if let Err(e) = cf.purge_urls(urls).await {
+                    tracing::warn!(file_id = %file_id, error = %e, "cloudflare purge failed");
+                }
+            });
+        }
+    }
+
     Ok(HttpResponse::Ok().json(FileSummary::from(file)))
+}
+
+async fn file_urls(
+    state: &AppState,
+    user_id: &str,
+    display_names: &[String],
+) -> Result<Option<Vec<String>>, AppError> {
+    if !state.cloudflare.is_configured() || display_names.is_empty() {
+        return Ok(None);
+    }
+    let domain: Option<(String, Option<String>)> = sqlx::query_as(
+        r#"
+        SELECT d.name, ds.files_path_prefix
+        FROM domain_settings ds
+        INNER JOIN domains d ON d.id = ds.files_domain_id
+        WHERE ds.user_id = $1
+        "#,
+    )
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(AppError::from)?;
+
+    let Some((host, prefix)) = domain else {
+        return Ok(None);
+    };
+    let prefix = prefix.map(|p| format!("{p}/")).unwrap_or_default();
+
+    let mut urls = Vec::with_capacity(display_names.len() * 2);
+    for name in display_names {
+        urls.push(format!("https://{host}/{prefix}{name}"));
+        urls.push(format!("https://{host}/{prefix}raw/{name}"));
+    }
+    Ok(Some(urls))
 }

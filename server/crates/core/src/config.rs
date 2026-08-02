@@ -29,6 +29,9 @@ pub struct Config {
     pub public_ingest_url: String,
 
     pub max_upload_size_bytes: usize,
+
+    pub cloudflare_zone_id: Option<String>,
+    pub cloudflare_api_token: Option<SecretString>,
 }
 
 impl Config {
@@ -83,6 +86,14 @@ impl Config {
                 .expect("MAX_UPLOAD_SIZE_MB malformed")
                 * 1024
                 * 1024,
+
+            cloudflare_zone_id: env::var("CLOUDFLARE_ZONE_ID")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            cloudflare_api_token: env::var("CLOUDFLARE_API_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(SecretString::from),
         }
     }
 }

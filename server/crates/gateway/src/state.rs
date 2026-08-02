@@ -1,4 +1,5 @@
 use iono_core::{
+    cloudflare::CloudflareClient,
     state::{HasDb, HasJwtSecret},
     storage::Storage,
     Config,
@@ -11,6 +12,7 @@ use webauthn_rs::Webauthn;
 pub struct AppState {
     pub db: PgPool,
     pub storage: Arc<dyn Storage>,
+    pub cloudflare: Arc<CloudflareClient>,
     pub config: Config,
     pub webauthn: Webauthn,
 }

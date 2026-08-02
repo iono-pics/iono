@@ -78,3 +78,5 @@ image = { version = "0.25", default-features = false, features = [
 
 aws-sdk-s3 = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
+
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

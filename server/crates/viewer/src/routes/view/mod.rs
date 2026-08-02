@@ -90,18 +90,25 @@ async fn raw_file_inner(
 }
 
 fn cache_control(file: &File) -> header::CacheControl {
-    const YEAR: u32 = 31_536_000;
+    // browsers use max-age which must be short so mutations propagate quickly
+    // cloudflare uses s-maxage which can be long since we can purge it on mutation
+    const BROWSER_MAX_AGE: u32 = 300;
+    const EDGE_MAX_AGE: u32 = 31_536_000;
     if file.password_hash.is_some() {
         return header::CacheControl(vec![header::CacheDirective::NoStore]);
     }
-    let max_age = file
+    let cap = file
         .expires_at
-        .map(|expires| (expires - Utc::now()).num_seconds().clamp(0, YEAR as i64) as u32)
-        .unwrap_or(YEAR);
+        .map(|expires| {
+            (expires - Utc::now())
+                .num_seconds()
+                .clamp(0, EDGE_MAX_AGE as i64) as u32
+        })
+        .unwrap_or(EDGE_MAX_AGE);
     header::CacheControl(vec![
         header::CacheDirective::Public,
-        header::CacheDirective::MaxAge(max_age),
-        header::CacheDirective::Extension("immutable".to_owned(), None),
+        header::CacheDirective::MaxAge(BROWSER_MAX_AGE.min(cap)),
+        header::CacheDirective::SMaxAge(cap),
     ])
 }
 

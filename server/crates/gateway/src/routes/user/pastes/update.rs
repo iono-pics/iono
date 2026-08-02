@@ -133,7 +133,43 @@ pub async fn update_paste(
         return Err(AppError::NotFound.into());
     };
 
+    let content_or_password_changed = body.content.is_some() || password_provided;
+    if content_or_password_changed {
+        if let Some(url) = paste_url(&state, &user.0.id, &paste.key).await? {
+            let cf = state.cloudflare.clone();
+            let paste_id = paste.id.clone();
+            tokio::spawn(async move {
+                if let Err(e) = cf.purge_urls(vec![url]).await {
+                    tracing::warn!(paste_id = %paste_id, error = %e, "cloudflare purge failed");
+                }
+            });
+        }
+    }
+
     Ok(HttpResponse::Ok().json(PasteSummary::from(paste)))
+}
+
+async fn paste_url(state: &AppState, user_id: &str, key: &str) -> Result<Option<String>, AppError> {
+    if !state.cloudflare.is_configured() {
+        return Ok(None);
+    }
+    let domain: Option<(String, Option<String>)> = sqlx::query_as(
+        r#"
+        SELECT d.name, ds.pastes_path_prefix
+        FROM domain_settings ds
+        INNER JOIN domains d ON d.id = ds.pastes_domain_id
+        WHERE ds.user_id = $1
+        "#,
+    )
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(AppError::from)?;
+
+    Ok(domain.map(|(host, prefix)| {
+        let prefix = prefix.map(|p| format!("{p}/")).unwrap_or_default();
+        format!("https://{host}/p/{prefix}{key}")
+    }))
 }
 
 fn validate(body: &UpdatePasteRequest) -> Result<(), AppError> {
