@@ -7,7 +7,12 @@ pub async fn plan_for_user(pool: &PgPool, user_id: &str) -> Result<Plan, AppErro
     sqlx::query_as::<_, Plan>(
         r#"
         SELECT p.* FROM plans p
-        INNER JOIN users u ON u.plan_id = p.id
+        INNER JOIN users u
+            ON p.id = CASE
+                WHEN u.plan_expires_at IS NOT NULL AND u.plan_expires_at <= now()
+                    THEN 'free'
+                ELSE u.plan_id
+            END
         WHERE u.id = $1
         "#,
     )

@@ -8,6 +8,7 @@ pub mod links;
 pub mod me;
 pub mod passkeys;
 pub mod pastes;
+pub mod redeem;
 pub mod settings;
 pub mod sharex;
 pub mod storage;
@@ -53,6 +54,7 @@ pub fn scope() -> impl HttpServiceFactory {
                 .wrap(Governor::new(&AUTH_GOVERNOR))
                 .service(change_password::change_password)
                 .service(delete_account::delete_account)
+                .service(redeem::redeem_code)
                 .service(totp::setup::setup_totp)
                 .service(totp::confirm::confirm_totp)
                 .service(totp::disable::disable_totp)

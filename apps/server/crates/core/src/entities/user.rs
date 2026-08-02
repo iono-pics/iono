@@ -11,6 +11,7 @@ pub struct User {
     #[serde(skip_serializing)]
     pub password_hash: Option<String>,
     pub plan_id: String,
+    pub plan_expires_at: Option<DateTime<Utc>>,
     pub stripe_customer_id: Option<String>,
     #[serde(skip_serializing)]
     pub totp_secret: Option<String>,

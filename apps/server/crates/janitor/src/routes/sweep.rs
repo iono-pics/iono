@@ -123,6 +123,17 @@ async fn run_sweep(state: &AppState) -> Result<(u64, u64), AppError> {
             .rows_affected();
     deleted += expired_links;
 
+    let reverted_plans = sqlx::query(
+        r#"
+        UPDATE users SET plan_id = 'free', plan_expires_at = NULL
+        WHERE plan_expires_at IS NOT NULL AND plan_expires_at <= now()
+        "#,
+    )
+    .execute(&state.core.db)
+    .await?
+    .rows_affected();
+    deleted += reverted_plans;
+
     let (purged_users, purged_files_failed) = purge_expired_deletions(state).await?;
     deleted += purged_users;
     failed += purged_files_failed;
