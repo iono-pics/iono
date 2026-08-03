@@ -1,3 +1,4 @@
+pub mod discord;
 pub mod login;
 pub mod passkey_login_finish;
 pub mod passkey_login_start;
@@ -24,4 +25,7 @@ pub fn scope() -> impl HttpServiceFactory {
         .service(passkey_login_start::passkey_login_start)
         .service(passkey_login_finish::passkey_login_finish)
         .service(restore::restore)
+        .service(discord::start::discord_start)
+        .service(discord::callback::discord_callback)
+        .service(discord::login::discord_login)
 }

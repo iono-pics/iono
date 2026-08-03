@@ -6,6 +6,7 @@ pub mod content_type;
 pub mod db;
 pub mod entities;
 pub mod error;
+pub mod oauth;
 pub mod openapi;
 pub mod quota;
 pub mod state;

@@ -123,6 +123,12 @@ async fn run_sweep(state: &AppState) -> Result<(u64, u64), AppError> {
             .rows_affected();
     deleted += expired_links;
 
+    let expired_oauth_flows = sqlx::query("DELETE FROM oauth_flow_states WHERE expires_at < now()")
+        .execute(&state.core.db)
+        .await?
+        .rows_affected();
+    deleted += expired_oauth_flows;
+
     let reverted_plans = sqlx::query(
         r#"
         UPDATE users SET plan_id = 'free', plan_expires_at = NULL

@@ -1,0 +1,81 @@
+use actix_web::{http::header, post, web, HttpRequest, HttpResponse};
+use iono_core::{auth::jwt, web::ApiResult};
+use secrecy::ExposeSecret;
+use serde::Deserialize;
+use serde_json::json;
+use utoipa::ToSchema;
+
+use crate::{
+    routes::auth::discord::{
+        consume_flow_and_fetch, link_to_user, login_or_signup, DiscordAuthResponse,
+    },
+    state::AppState,
+};
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct DiscordLoginRequest {
+    code: String,
+    state: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/auth/discord/login",
+    request_body = DiscordLoginRequest,
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "signed in", body = DiscordAuthResponse),
+        (status = 201, description = "account created and signed in", body = DiscordAuthResponse),
+        (status = 204, description = "discord linked to your account"),
+        (status = 400, description = "invalid request"),
+        (status = 401, description = "authorization failed"),
+        (status = 409, description = "that discord account is linked elsewhere"),
+    )
+)]
+#[post("/discord/login")]
+pub async fn discord_login(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<DiscordLoginRequest>,
+) -> ApiResult<HttpResponse> {
+    let body = body.into_inner();
+
+    let (tokens, discord_user, link_user_id_from_flow) =
+        consume_flow_and_fetch(&state, &body.state, &body.code).await?;
+
+    let bearer_user_id = if let Some(bearer) = extract_bearer(&req) {
+        let user =
+            jwt::authenticate(&state.db, state.config.jwt_secret.expose_secret(), &bearer).await?;
+        Some(user.id)
+    } else {
+        None
+    };
+
+    let link_target = bearer_user_id.or(link_user_id_from_flow);
+
+    if let Some(user_id) = link_target {
+        link_to_user(&state, &user_id, &tokens, &discord_user).await?;
+        return Ok(HttpResponse::NoContent().finish());
+    }
+
+    let (access_token, is_new_user) = login_or_signup(&state, &tokens, &discord_user).await?;
+    let payload = json!({
+        "access_token": access_token,
+        "is_new_user": is_new_user,
+    });
+    if is_new_user {
+        Ok(HttpResponse::Created().json(payload))
+    } else {
+        Ok(HttpResponse::Ok().json(payload))
+    }
+}
+
+fn extract_bearer(req: &HttpRequest) -> Option<String> {
+    let value = req.headers().get(header::AUTHORIZATION)?.to_str().ok()?;
+    let token = value.strip_prefix("Bearer ")?.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}

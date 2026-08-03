@@ -3,7 +3,12 @@ use tracing_actix_web::TracingLogger;
 
 use std::sync::Arc;
 
-use iono_core::{cloudflare::CloudflareClient, db, storage};
+use iono_core::{
+    cloudflare::CloudflareClient,
+    db,
+    oauth::{OAuthClient, DISCORD_PROVIDER},
+    storage,
+};
 use secrecy::ExposeSecret;
 
 mod auth;
@@ -41,6 +46,13 @@ async fn main() -> std::io::Result<()> {
         config.cloudflare_api_token.clone(),
     ));
 
+    let discord = Arc::new(OAuthClient::new(
+        DISCORD_PROVIDER,
+        config.discord_client_id.clone(),
+        config.discord_client_secret.clone(),
+        config.discord_redirect_uri.clone(),
+    ));
+
     let stripe = config
         .stripe_api_key
         .as_ref()
@@ -50,6 +62,7 @@ async fn main() -> std::io::Result<()> {
         db,
         storage,
         cloudflare,
+        discord,
         stripe,
         config,
         webauthn,

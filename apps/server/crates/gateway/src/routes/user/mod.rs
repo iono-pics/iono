@@ -1,6 +1,7 @@
 pub mod api_keys;
 pub mod billing;
 pub mod change_password;
+pub mod connections;
 pub mod delete_account;
 pub mod embeds;
 pub mod export;
@@ -52,6 +53,8 @@ pub fn scope() -> impl HttpServiceFactory {
         .service(links::delete::delete_short_link)
         .service(links::update::update_short_link)
         .service(sharex::sharex_config)
+        .service(connections::discord::unlink_discord)
+        .service(connections::discord::start_link_discord)
         .service(
             web::scope("")
                 .wrap(Governor::new(&AUTH_GOVERNOR))

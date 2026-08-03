@@ -35,6 +35,11 @@ pub struct Config {
 
     pub stripe_api_key: Option<SecretString>,
     pub stripe_portal_return_url: Option<String>,
+
+    pub discord_client_id: Option<String>,
+    pub discord_client_secret: Option<SecretString>,
+    pub discord_redirect_uri: Option<String>,
+    pub discord_success_redirect_url: Option<String>,
 }
 
 impl Config {
@@ -106,6 +111,18 @@ impl Config {
                 .ok()
                 .filter(|s| !s.is_empty())
                 .map(|s| s.trim_end_matches('/').to_string()),
+
+            discord_client_id: env::var("DISCORD_CLIENT_ID").ok().filter(|s| !s.is_empty()),
+            discord_client_secret: env::var("DISCORD_CLIENT_SECRET")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(SecretString::from),
+            discord_redirect_uri: env::var("DISCORD_REDIRECT_URI")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            discord_success_redirect_url: env::var("DISCORD_SUCCESS_REDIRECT_URL")
+                .ok()
+                .filter(|s| !s.is_empty()),
         }
     }
 }
