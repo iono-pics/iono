@@ -1,5 +1,6 @@
 use actix_multipart::form::MultipartFormConfig;
 use actix_web::{http::Method, web, App, HttpServer};
+use secrecy::ExposeSecret;
 use tracing_actix_web::TracingLogger;
 
 use iono_core::AppError;
@@ -24,8 +25,10 @@ async fn main() -> std::io::Result<()> {
     tracing::info!("iono-ingest listening on http://{}:{}", host, port);
 
     let state = web::Data::new(state);
+    let governor = routes::rate_limit::ingest_governor(config.jwt_secret.expose_secret());
 
     HttpServer::new(move || {
+        let governor = governor.clone();
         let cors = iono_core::web::cors([Method::POST]);
         App::new()
             .wrap(cors)
@@ -40,7 +43,7 @@ async fn main() -> std::io::Result<()> {
                         ApiError(AppError::BadRequest(err.to_string())).into()
                     }),
             )
-            .configure(routes::configure)
+            .configure(move |cfg| routes::configure(cfg, &governor))
     })
     .bind((host, port))?
     .run()

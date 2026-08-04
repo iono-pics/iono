@@ -10,6 +10,7 @@ pub mod error;
 pub mod oauth;
 pub mod openapi;
 pub mod quota;
+pub mod rate_limit;
 pub mod state;
 pub mod storage;
 pub mod telemetry;

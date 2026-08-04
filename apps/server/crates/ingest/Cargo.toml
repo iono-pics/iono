@@ -11,6 +11,7 @@ workspace = true
 iono-core.workspace = true
 
 actix-web.workspace = true
+actix-governor.workspace = true
 actix-multipart.workspace = true
 utoipa.workspace = true
 
@@ -19,6 +20,7 @@ sqlx.workspace = true
 
 serde.workspace = true
 serde_json.workspace = true
+secrecy.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 
