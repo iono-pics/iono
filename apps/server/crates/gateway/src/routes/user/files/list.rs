@@ -45,8 +45,17 @@ pub struct ListFilesQuery {
     folder_id: Option<String>,
     #[serde(default)]
     favourites_only: bool,
-    #[serde(flatten)]
-    page: Page,
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+impl ListFilesQuery {
+    fn page(&self) -> Page {
+        Page {
+            limit: self.limit,
+            offset: self.offset,
+        }
+    }
 }
 
 #[utoipa::path(
@@ -72,7 +81,7 @@ pub async fn list_files(
     query: web::Query<ListFilesQuery>,
 ) -> ApiResult<HttpResponse> {
     let query = query.into_inner();
-    let (limit, offset) = query.page.resolve(50, 200);
+    let (limit, offset) = query.page().resolve(50, 200);
 
     let mut sql: QueryBuilder<sqlx::Postgres> =
         QueryBuilder::new("SELECT * FROM files WHERE user_id = ");

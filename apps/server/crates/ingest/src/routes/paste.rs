@@ -138,6 +138,7 @@ fn validate(body: &CreatePasteRequest) -> Result<(), AppError> {
             "paste content must be at most 1 MiB".into(),
         ));
     }
+    validators::no_nul(&body.content, "paste content")?;
     if let Some(title) = &body.title {
         validators::text_length(title, 256, "paste title")?;
     }

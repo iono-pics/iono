@@ -88,6 +88,10 @@ fn validate_prefix(value: &str) -> Result<(), AppError> {
             "path prefix may only contain letters, numbers, and '-'".into(),
         ));
     }
+
+    if value == "raw" {
+        return Err(AppError::BadRequest("path prefix 'raw' is reserved".into()));
+    }
     Ok(())
 }
 
@@ -167,7 +171,14 @@ pub async fn update_domain_settings(
     .bind(&user.0.id)
     .fetch_optional(&state.db)
     .await
-    .map_err(MapDbError::new().on_foreign_key_not_found().build())?;
+    .map_err(|e| {
+        if let sqlx::Error::Database(db_err) = &e {
+            if db_err.code().as_deref() == Some("P0001") {
+                return AppError::NotFound;
+            }
+        }
+        MapDbError::new().on_foreign_key_not_found().build()(e)
+    })?;
 
     let Some(settings) = updated else {
         return Err(AppError::internal("user has no domain_settings row").into());

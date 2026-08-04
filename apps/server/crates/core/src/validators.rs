@@ -2,12 +2,22 @@ use chrono::{DateTime, Utc};
 
 use crate::error::AppError;
 
+pub fn no_nul(value: &str, label: &str) -> Result<(), AppError> {
+    if value.contains('\0') {
+        return Err(AppError::BadRequest(format!(
+            "{label} must not contain null bytes"
+        )));
+    }
+    Ok(())
+}
+
 pub fn http_url(value: &str, max_len: usize) -> Result<(), AppError> {
     if value.len() > max_len {
         return Err(AppError::BadRequest(format!(
             "URL must be at most {max_len} characters"
         )));
     }
+    no_nul(value, "URL")?;
     if !value.starts_with("http://") && !value.starts_with("https://") {
         return Err(AppError::BadRequest(
             "URL must start with http:// or https://".into(),
@@ -31,7 +41,7 @@ pub fn password(value: &str, max_len: usize) -> Result<(), AppError> {
             "password must be 1-{max_len} characters, or null to remove it"
         )));
     }
-    Ok(())
+    no_nul(value, "password")
 }
 
 pub fn text_length(value: &str, max_chars: usize, label: &str) -> Result<(), AppError> {
@@ -40,7 +50,7 @@ pub fn text_length(value: &str, max_chars: usize, label: &str) -> Result<(), App
             "{label} must be at most {max_chars} characters"
         )));
     }
-    Ok(())
+    no_nul(value, label)
 }
 
 pub fn hex_color(value: &str) -> Result<(), AppError> {

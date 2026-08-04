@@ -211,8 +211,9 @@ mod tests {
         .execute(db)
         .await
         .unwrap();
+
         sqlx::query(
-            "INSERT INTO embed_settings (user_id, enabled, active_preset_id) VALUES ('u1', $1, 'p1')",
+            "UPDATE embed_settings SET enabled = $1, active_preset_id = 'p1' WHERE user_id = 'u1'",
         )
         .bind(enabled)
         .execute(db)

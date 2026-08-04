@@ -65,7 +65,7 @@ pub async fn update_paste(
 
     if let Some(new_content) = &body.content {
         let old_len: i64 = sqlx::query_scalar(
-            "SELECT octet_length(content) FROM pastes WHERE id = $1 AND user_id = $2",
+            "SELECT octet_length(content)::BIGINT FROM pastes WHERE id = $1 AND user_id = $2",
         )
         .bind(&paste_id)
         .bind(&user.0.id)
@@ -142,6 +142,7 @@ fn validate(body: &UpdatePasteRequest) -> Result<(), AppError> {
         if content.len() > MAX_CONTENT_LENGTH {
             return Err(AppError::BadRequest("content must be at most 1 MiB".into()));
         }
+        validators::no_nul(content, "content")?;
     }
 
     if let Some(title) = body.title.as_set() {
