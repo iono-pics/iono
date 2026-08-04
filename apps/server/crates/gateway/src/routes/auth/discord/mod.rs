@@ -10,13 +10,15 @@ use iono_core::{
     AppError,
 };
 use rand::RngExt;
-use secrecy::ExposeSecret;
 use serde::Serialize;
 use sqlx::PgPool;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::state::AppState;
+use crate::{
+    routes::auth::{mfa_challenge, MfaChallenge},
+    state::AppState,
+};
 
 const PROVIDER: &str = "discord";
 const FLOW_STATE_TTL_MINUTES: i64 = 15;
@@ -77,11 +79,21 @@ pub(crate) async fn consume_flow_and_fetch(
     Ok((tokens, discord_user, link_user_id))
 }
 
+pub(crate) enum LoginOutcome {
+    SignedIn {
+        access_token: String,
+        is_new_user: bool,
+    },
+    MfaRequired(MfaChallenge),
+}
+
 pub(crate) async fn login_or_signup(
-    state: &AppState,
+    db: &PgPool,
+    jwt_secret: &str,
+    access_ttl_minutes: i64,
     tokens: &Tokens,
     discord_user: &DiscordUser,
-) -> Result<(String, bool), AppError> {
+) -> Result<LoginOutcome, AppError> {
     let expires_at = tokens.expires_in.map(|s| Utc::now() + Duration::seconds(s));
 
     let existing: Option<(String,)> = sqlx::query_as(
@@ -89,14 +101,14 @@ pub(crate) async fn login_or_signup(
     )
     .bind(PROVIDER)
     .bind(&discord_user.id)
-    .fetch_optional(&state.db)
+    .fetch_optional(db)
     .await
     .map_err(AppError::from)?;
 
     if let Some((user_id,)) = existing {
         let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
             .bind(&user_id)
-            .fetch_optional(&state.db)
+            .fetch_optional(db)
             .await
             .map_err(AppError::from)?
             .ok_or(AppError::Unauthorized)?;
@@ -119,22 +131,25 @@ pub(crate) async fn login_or_signup(
         .bind(expires_at)
         .bind(PROVIDER)
         .bind(&discord_user.id)
-        .execute(&state.db)
+        .execute(db)
         .await
         .map_err(AppError::from)?;
 
-        let access_token = jwt::issue_access_token(
-            &user.id,
-            user.token_version,
-            state.config.jwt_secret.expose_secret(),
-            state.config.jwt_access_ttl_minutes,
-        )?;
-        return Ok((access_token, false));
+        if let Some(challenge) = mfa_challenge(db, jwt_secret, &user).await? {
+            return Ok(LoginOutcome::MfaRequired(challenge));
+        }
+
+        let access_token =
+            jwt::issue_access_token(&user.id, user.token_version, jwt_secret, access_ttl_minutes)?;
+        return Ok(LoginOutcome::SignedIn {
+            access_token,
+            is_new_user: false,
+        });
     }
 
-    let user = create_user_from_discord(&state.db, discord_user).await?;
+    let user = create_user_from_discord(db, discord_user).await?;
     insert_oauth_account(
-        &state.db,
+        db,
         &user.id,
         &discord_user.id,
         &tokens.access_token,
@@ -143,13 +158,12 @@ pub(crate) async fn login_or_signup(
     )
     .await?;
 
-    let access_token = jwt::issue_access_token(
-        &user.id,
-        user.token_version,
-        state.config.jwt_secret.expose_secret(),
-        state.config.jwt_access_ttl_minutes,
-    )?;
-    Ok((access_token, true))
+    let access_token =
+        jwt::issue_access_token(&user.id, user.token_version, jwt_secret, access_ttl_minutes)?;
+    Ok(LoginOutcome::SignedIn {
+        access_token,
+        is_new_user: true,
+    })
 }
 
 pub(crate) async fn link_to_user(
@@ -349,4 +363,108 @@ fn sanitize_username(raw: &str) -> String {
         cleaned.push('_');
     }
     cleaned
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SECRET: &str = "test-secret";
+    const TTL: i64 = 15;
+
+    fn tokens() -> Tokens {
+        Tokens {
+            access_token: "discord-access".into(),
+            refresh_token: None,
+            expires_in: None,
+        }
+    }
+
+    fn discord_user() -> DiscordUser {
+        DiscordUser {
+            id: "discord-1".into(),
+            username: "cat".into(),
+            email: None,
+            verified: None,
+            avatar: None,
+            global_name: None,
+        }
+    }
+
+    async fn seed_linked_user(db: &PgPool, totp_enabled: bool) {
+        sqlx::query(
+            r#"
+            INSERT INTO users (id, username, email, totp_secret, totp_enabled)
+            VALUES ('u1', 'cat', 'cat@iono.test', $1, $2)
+            "#,
+        )
+        .bind(totp_enabled.then_some("SECRETSECRET"))
+        .bind(totp_enabled)
+        .execute(db)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            r#"
+            INSERT INTO oauth_accounts (id, user_id, provider, provider_user_id)
+            VALUES ('o1', 'u1', 'discord', 'discord-1')
+            "#,
+        )
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn linked_account_with_totp_is_challenged(db: PgPool) {
+        seed_linked_user(&db, true).await;
+
+        let outcome = login_or_signup(&db, SECRET, TTL, &tokens(), &discord_user())
+            .await
+            .unwrap();
+
+        match outcome {
+            LoginOutcome::MfaRequired(challenge) => assert_eq!(challenge.methods(), ["totp"]),
+            LoginOutcome::SignedIn { .. } => panic!("discord login bypassed mfa"),
+        }
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn linked_account_without_mfa_signs_in(db: PgPool) {
+        seed_linked_user(&db, false).await;
+
+        let outcome = login_or_signup(&db, SECRET, TTL, &tokens(), &discord_user())
+            .await
+            .unwrap();
+
+        match outcome {
+            LoginOutcome::SignedIn { is_new_user, .. } => assert!(!is_new_user),
+            LoginOutcome::MfaRequired(_) => panic!("account has no mfa"),
+        }
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn unknown_discord_account_creates_a_user(db: PgPool) {
+        let outcome = login_or_signup(&db, SECRET, TTL, &tokens(), &discord_user())
+            .await
+            .unwrap();
+
+        match outcome {
+            LoginOutcome::SignedIn { is_new_user, .. } => assert!(is_new_user),
+            LoginOutcome::MfaRequired(_) => panic!("a new account has no mfa"),
+        }
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn deleted_user_cannot_sign_in(db: PgPool) {
+        seed_linked_user(&db, false).await;
+        sqlx::query("UPDATE users SET deleted_at = now() WHERE id = 'u1'")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let result = login_or_signup(&db, SECRET, TTL, &tokens(), &discord_user()).await;
+
+        assert!(matches!(result, Err(AppError::Unauthorized)));
+    }
 }

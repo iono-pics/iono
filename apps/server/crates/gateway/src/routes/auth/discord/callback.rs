@@ -1,11 +1,15 @@
 use actix_web::{get, http::header, web, HttpResponse};
 use iono_core::{web::ApiResult, AppError};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use secrecy::ExposeSecret;
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
-    routes::auth::discord::{consume_flow_and_fetch, link_to_user, login_or_signup},
+    routes::auth::{
+        discord::{consume_flow_and_fetch, link_to_user, login_or_signup, LoginOutcome},
+        MfaChallenge,
+    },
     state::AppState,
 };
 
@@ -18,6 +22,7 @@ pub struct CallbackQuery {
 
 enum Outcome {
     SignedIn(String),
+    MfaRequired(MfaChallenge),
     Linked,
     Error(String),
 }
@@ -26,7 +31,7 @@ enum Outcome {
     get,
     path = "/auth/discord/callback",
     responses(
-        (status = 200, description = "signed in, returns { access_token }"),
+        (status = 200, description = "signed in, returns { access_token }, or { mfa_required, mfa_token, methods } if the account has mfa"),
         (status = 204, description = "discord linked to your account"),
         (status = 302, description = "redirect back to the app, result is passed as a url fragment"),
         (status = 400, description = "invalid callback"),
@@ -58,8 +63,20 @@ pub async fn discord_callback(
         return respond(&state, Outcome::Linked);
     }
 
-    let (access_token, _is_new_user) = login_or_signup(&state, &tokens, &discord_user).await?;
-    respond(&state, Outcome::SignedIn(access_token))
+    let login = login_or_signup(
+        &state.db,
+        state.config.jwt_secret.expose_secret(),
+        state.config.jwt_access_ttl_minutes,
+        &tokens,
+        &discord_user,
+    )
+    .await?;
+
+    let outcome = match login {
+        LoginOutcome::SignedIn { access_token, .. } => Outcome::SignedIn(access_token),
+        LoginOutcome::MfaRequired(challenge) => Outcome::MfaRequired(challenge),
+    };
+    respond(&state, outcome)
 }
 
 fn respond(state: &AppState, outcome: Outcome) -> ApiResult<HttpResponse> {
@@ -69,6 +86,11 @@ fn respond(state: &AppState, outcome: Outcome) -> ApiResult<HttpResponse> {
             Outcome::SignedIn(token) => {
                 format!("token={}", utf8_percent_encode(token, NON_ALPHANUMERIC))
             }
+            Outcome::MfaRequired(challenge) => format!(
+                "mfa_required=1&mfa_token={}&methods={}",
+                utf8_percent_encode(challenge.token(), NON_ALPHANUMERIC),
+                challenge.methods().join(",")
+            ),
             Outcome::Linked => "linked=1".to_string(),
             Outcome::Error(err) => {
                 format!("error={}", utf8_percent_encode(err, NON_ALPHANUMERIC))
@@ -84,6 +106,7 @@ fn respond(state: &AppState, outcome: Outcome) -> ApiResult<HttpResponse> {
         Outcome::SignedIn(access_token) => {
             Ok(HttpResponse::Ok().json(json!({ "access_token": access_token })))
         }
+        Outcome::MfaRequired(challenge) => Ok(HttpResponse::Ok().json(challenge.json())),
         Outcome::Linked => Ok(HttpResponse::NoContent().finish()),
         Outcome::Error(err) => Err(AppError::BadRequest(err).into()),
     }

@@ -7,7 +7,7 @@ use utoipa::ToSchema;
 
 use crate::{
     routes::auth::discord::{
-        consume_flow_and_fetch, link_to_user, login_or_signup, DiscordAuthResponse,
+        consume_flow_and_fetch, link_to_user, login_or_signup, DiscordAuthResponse, LoginOutcome,
     },
     state::AppState,
 };
@@ -24,7 +24,7 @@ pub struct DiscordLoginRequest {
     request_body = DiscordLoginRequest,
     security(("bearer_auth" = [])),
     responses(
-        (status = 200, description = "signed in", body = DiscordAuthResponse),
+        (status = 200, description = "signed in, or {mfa_required: true, mfa_token, methods} if the account has mfa", body = DiscordAuthResponse),
         (status = 201, description = "account created and signed in", body = DiscordAuthResponse),
         (status = 204, description = "discord linked to your account"),
         (status = 400, description = "invalid request"),
@@ -58,15 +58,31 @@ pub async fn discord_login(
         return Ok(HttpResponse::NoContent().finish());
     }
 
-    let (access_token, is_new_user) = login_or_signup(&state, &tokens, &discord_user).await?;
-    let payload = json!({
-        "access_token": access_token,
-        "is_new_user": is_new_user,
-    });
-    if is_new_user {
-        Ok(HttpResponse::Created().json(payload))
-    } else {
-        Ok(HttpResponse::Ok().json(payload))
+    let outcome = login_or_signup(
+        &state.db,
+        state.config.jwt_secret.expose_secret(),
+        state.config.jwt_access_ttl_minutes,
+        &tokens,
+        &discord_user,
+    )
+    .await?;
+
+    match outcome {
+        LoginOutcome::MfaRequired(challenge) => Ok(HttpResponse::Ok().json(challenge.json())),
+        LoginOutcome::SignedIn {
+            access_token,
+            is_new_user,
+        } => {
+            let payload = json!({
+                "access_token": access_token,
+                "is_new_user": is_new_user,
+            });
+            if is_new_user {
+                Ok(HttpResponse::Created().json(payload))
+            } else {
+                Ok(HttpResponse::Ok().json(payload))
+            }
+        }
     }
 }
 

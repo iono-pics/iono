@@ -10,7 +10,7 @@ use utoipa::ToSchema;
 
 use iono_core::web::ApiResult;
 
-use crate::state::AppState;
+use crate::{routes::auth::mfa_challenge, state::AppState};
 
 #[derive(Deserialize, ToSchema)]
 pub struct LoginRequest {
@@ -50,27 +50,10 @@ pub async fn login(
         return Err(AppError::Unauthorized.into());
     }
 
-    let passkey_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM passkeys WHERE user_id = $1")
-        .bind(&user.id)
-        .fetch_one(&state.db)
-        .await
-        .map_err(AppError::from)?;
-
-    if user.totp_enabled || user.passkey_required {
-        let mut methods = Vec::new();
-        if passkey_count > 0 {
-            methods.push("passkey");
-        }
-        if user.totp_enabled {
-            methods.push("totp");
-        }
-
-        let mfa_token = jwt::issue_mfa_token(&user.id, state.config.jwt_secret.expose_secret())?;
-        return Ok(HttpResponse::Ok().json(serde_json::json!({
-            "mfa_required": true,
-            "mfa_token": mfa_token,
-            "methods": methods,
-        })));
+    if let Some(challenge) =
+        mfa_challenge(&state.db, state.config.jwt_secret.expose_secret(), &user).await?
+    {
+        return Ok(HttpResponse::Ok().json(challenge.json()));
     }
 
     let access_token = jwt::issue_access_token(
