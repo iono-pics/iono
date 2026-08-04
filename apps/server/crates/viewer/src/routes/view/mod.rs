@@ -12,6 +12,7 @@ use iono_core::{
     AppError,
 };
 use serde::Deserialize;
+use sqlx::PgPool;
 
 use iono_core::web::{append_password_query, ApiResult};
 
@@ -33,8 +34,12 @@ async fn view_page_inner(
     }
 
     let raw_url = append_password_query(raw_url_base, query.password.as_deref());
-    let preset = fetch_active_preset(state, &file.user_id).await?;
-    let html = embed::render_embed_html(&file, &raw_url, preset.as_ref());
+    let active = fetch_active_preset(&state.db, &file.user_id).await?;
+    let (preset, uploader) = match active {
+        Some(active) => (Some(active.preset), active.username),
+        None => (None, String::new()),
+    };
+    let html = embed::render_embed_html(&file, &uploader, &raw_url, preset.as_ref());
 
     Ok(HttpResponse::Ok()
         .content_type(header::ContentType::html())
@@ -153,19 +158,24 @@ async fn fetch_file_with_prefix(
     .ok_or(AppError::NotFound)
 }
 
-async fn fetch_active_preset(
-    state: &AppState,
-    user_id: &str,
-) -> Result<Option<EmbedPreset>, AppError> {
-    sqlx::query_as::<_, EmbedPreset>(
+#[derive(sqlx::FromRow)]
+struct ActivePreset {
+    #[sqlx(flatten)]
+    preset: EmbedPreset,
+    username: String,
+}
+
+async fn fetch_active_preset(db: &PgPool, user_id: &str) -> Result<Option<ActivePreset>, AppError> {
+    sqlx::query_as::<_, ActivePreset>(
         r#"
-        SELECT p.* FROM embed_settings s
+        SELECT p.*, u.username FROM embed_settings s
         INNER JOIN embed_presets p ON p.id = s.active_preset_id
+        INNER JOIN users u ON u.id = s.user_id
         WHERE s.user_id = $1 AND s.enabled
         "#,
     )
     .bind(user_id)
-    .fetch_optional(&state.db)
+    .fetch_optional(db)
     .await
     .map_err(AppError::from)
 }
@@ -179,4 +189,65 @@ async fn unlock(file: &File, provided: Option<&str>) -> Result<bool, AppError> {
     };
 
     verify_password_async(provided, hash).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn seed_preset(db: &PgPool, enabled: bool) {
+        sqlx::query(
+            "INSERT INTO users (id, username, email) VALUES ('u1', 'cat', 'cat@iono.test')",
+        )
+        .execute(db)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO embed_presets (id, user_id, name, title, description, color)
+            VALUES ('p1', 'u1', 'default', '{filename}', 'by {uploader}', '#7c3aed')
+            "#,
+        )
+        .execute(db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO embed_settings (user_id, enabled, active_preset_id) VALUES ('u1', $1, 'p1')",
+        )
+        .bind(enabled)
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn active_preset_maps_both_tables(db: PgPool) {
+        seed_preset(&db, true).await;
+
+        let active = fetch_active_preset(&db, "u1")
+            .await
+            .unwrap()
+            .expect("preset should be active");
+
+        assert_eq!(active.username, "cat");
+        assert_eq!(active.preset.id, "p1");
+        assert_eq!(active.preset.user_id, "u1");
+        assert_eq!(active.preset.name, "default");
+        assert_eq!(active.preset.title.as_deref(), Some("{filename}"));
+        assert_eq!(active.preset.description.as_deref(), Some("by {uploader}"));
+        assert_eq!(active.preset.color.as_deref(), Some("#7c3aed"));
+        assert_eq!(active.preset.site_name, None);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn no_preset_when_embeds_disabled(db: PgPool) {
+        seed_preset(&db, false).await;
+
+        assert!(fetch_active_preset(&db, "u1").await.unwrap().is_none());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn no_preset_for_unknown_user(db: PgPool) {
+        assert!(fetch_active_preset(&db, "nobody").await.unwrap().is_none());
+    }
 }

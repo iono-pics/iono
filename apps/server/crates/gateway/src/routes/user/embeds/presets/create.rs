@@ -1,7 +1,6 @@
 use actix_web::{post, web, HttpResponse};
 use iono_core::{
     entities::EmbedPreset,
-    validators,
     web::{ApiResult, MapDbError},
     AppError,
 };
@@ -11,7 +10,9 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::{
-    auth::AuthedUser, routes::user::embeds::presets::EmbedPresetResponse, state::AppState,
+    auth::AuthedUser,
+    routes::user::embeds::presets::{EmbedPresetResponse, PresetFields},
+    state::AppState,
 };
 
 #[derive(Debug, Deserialize, Validate, ToSchema)]
@@ -50,27 +51,16 @@ pub async fn create_embed_preset(
 
     let body = body.into_inner();
 
-    if let Some(site_name) = &body.site_name {
-        validators::text_length(site_name, 256, "site_name")?;
+    PresetFields {
+        site_name: body.site_name.as_deref(),
+        site_url: body.site_url.as_deref(),
+        author_name: body.author_name.as_deref(),
+        author_url: body.author_url.as_deref(),
+        title: body.title.as_deref(),
+        description: body.description.as_deref(),
+        color: body.color.as_deref(),
     }
-    if let Some(author_name) = &body.author_name {
-        validators::text_length(author_name, 256, "author_name")?;
-    }
-    if let Some(title) = &body.title {
-        validators::text_length(title, 256, "title")?;
-    }
-    if let Some(description) = &body.description {
-        validators::text_length(description, 1024, "description")?;
-    }
-    if let Some(site_url) = &body.site_url {
-        validators::http_url(site_url, 2048)?;
-    }
-    if let Some(author_url) = &body.author_url {
-        validators::http_url(author_url, 2048)?;
-    }
-    if let Some(color) = &body.color {
-        validators::hex_color(color)?;
-    }
+    .validate()?;
 
     let id = Uuid::new_v4().to_string();
 

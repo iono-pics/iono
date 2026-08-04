@@ -1,25 +1,19 @@
 use humansize::{format_size, FormatSizeOptions, WINDOWS};
-use iono_core::entities::{EmbedPreset, File};
+use iono_core::{
+    embed_vars::{self, EmbedVars},
+    entities::{EmbedPreset, File},
+};
 use maud::{html, PreEscaped, DOCTYPE};
 
 const DEFAULT_SITE_NAME: &str = "iono";
 const DEFAULT_COLOR: &str = "#7c3aed";
 
-pub fn render_embed_html(file: &File, raw_url: &str, preset: Option<&EmbedPreset>) -> String {
-    let title = preset
-        .and_then(|p| p.title.as_deref())
-        .unwrap_or(&file.display_name);
-    let description = preset.and_then(|p| p.description.as_deref()).unwrap_or("");
-    let site_name = preset
-        .and_then(|p| p.site_name.as_deref())
-        .unwrap_or(DEFAULT_SITE_NAME);
-    let color = sanitize_color(
-        preset
-            .and_then(|p| p.color.as_deref())
-            .unwrap_or(DEFAULT_COLOR),
-    );
-    let author = preset.and_then(|p| p.author_name.as_deref());
-
+pub fn render_embed_html(
+    file: &File,
+    uploader: &str,
+    raw_url: &str,
+    preset: Option<&EmbedPreset>,
+) -> String {
     let is_image = file.content_type.starts_with("image/");
     let is_video = file.content_type.starts_with("video/");
 
@@ -27,7 +21,31 @@ pub fn render_embed_html(file: &File, raw_url: &str, preset: Option<&EmbedPreset
         file.size_bytes.max(0) as u64,
         FormatSizeOptions::from(WINDOWS).decimal_places(1),
     );
-    let uploaded = file.created_at.format("%B %-d, %Y at %H:%M UTC");
+    let uploaded = file
+        .created_at
+        .format("%B %-d, %Y at %H:%M UTC")
+        .to_string();
+
+    let vars = EmbedVars {
+        filename: file.display_name.clone(),
+        size: size.clone(),
+        uploader: uploader.to_owned(),
+        date: uploaded.clone(),
+        content_type: file.content_type.clone(),
+    };
+    let resolve = |value: Option<&str>| value.map(|v| embed_vars::render(v, &vars));
+
+    let title = resolve(preset.and_then(|p| p.title.as_deref()))
+        .unwrap_or_else(|| file.display_name.clone());
+    let description = resolve(preset.and_then(|p| p.description.as_deref())).unwrap_or_default();
+    let site_name = resolve(preset.and_then(|p| p.site_name.as_deref()))
+        .unwrap_or_else(|| DEFAULT_SITE_NAME.to_owned());
+    let color = sanitize_color(
+        preset
+            .and_then(|p| p.color.as_deref())
+            .unwrap_or(DEFAULT_COLOR),
+    );
+    let author = resolve(preset.and_then(|p| p.author_name.as_deref()));
 
     html! {
         (DOCTYPE)
@@ -158,7 +176,12 @@ mod tests {
     #[test]
     fn escapes_preset_values() {
         let preset = test_preset(r#""><script>alert(1)</script>"#, "#fff");
-        let html = render_embed_html(&test_file("image/png"), "/raw/abc123.png", Some(&preset));
+        let html = render_embed_html(
+            &test_file("image/png"),
+            "cat",
+            "/raw/abc123.png",
+            Some(&preset),
+        );
         assert!(!html.contains("<script>"));
         assert!(html.contains("&lt;script&gt;"));
     }
@@ -166,23 +189,60 @@ mod tests {
     #[test]
     fn rejects_non_hex_colors() {
         let preset = test_preset("t", "}</style><script>alert(1)</script>");
-        let html = render_embed_html(&test_file("image/png"), "/raw/abc123.png", Some(&preset));
+        let html = render_embed_html(
+            &test_file("image/png"),
+            "cat",
+            "/raw/abc123.png",
+            Some(&preset),
+        );
         assert!(!html.contains("<script>alert"));
         assert!(html.contains(DEFAULT_COLOR));
     }
 
     #[test]
     fn image_files_get_og_image_tags() {
-        let html = render_embed_html(&test_file("image/png"), "/raw/abc123.png", None);
+        let html = render_embed_html(&test_file("image/png"), "cat", "/raw/abc123.png", None);
         assert!(html.contains(r#"property="og:image" content="/raw/abc123.png""#));
         assert!(html.contains("summary_large_image"));
     }
 
     #[test]
     fn video_files_get_player_tags() {
-        let html = render_embed_html(&test_file("video/mp4"), "/raw/abc123.mp4", None);
+        let html = render_embed_html(&test_file("video/mp4"), "cat", "/raw/abc123.mp4", None);
         assert!(html.contains(r#"property="og:video""#));
         assert!(html.contains(r#"content="video/mp4""#));
         assert!(html.contains("<video"));
+    }
+
+    #[test]
+    fn resolves_variables_in_preset_text() {
+        let mut preset = test_preset("{filename} ({size})", "#fff");
+        preset.description = Some("uploaded by {uploader} {type}".into());
+        let html = render_embed_html(
+            &test_file("image/png"),
+            "cat",
+            "/raw/abc123.png",
+            Some(&preset),
+        );
+
+        assert!(
+            html.contains(r#"property="og:title" content="abc123.png (70 B)""#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"content="uploaded by cat image/png""#),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn escapes_variable_values() {
+        let mut file = test_file("image/png");
+        file.display_name = "<script>alert(1)</script>.png".into();
+        let preset = test_preset("{filename}", "#fff");
+        let html = render_embed_html(&file, "cat", "/raw/abc123.png", Some(&preset));
+
+        assert!(!html.contains("<script>alert"));
+        assert!(html.contains("&lt;script&gt;"));
     }
 }

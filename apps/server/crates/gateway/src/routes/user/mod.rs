@@ -38,6 +38,7 @@ pub fn scope() -> impl HttpServiceFactory {
         .service(embeds::presets::create::create_embed_preset)
         .service(embeds::presets::update::update_embed_preset)
         .service(embeds::presets::delete::delete_embed_preset)
+        .service(embeds::variables::list_embed_variables)
         .service(passkeys::list::list_passkeys)
         .service(files::list::list_files)
         .service(files::delete::delete_file)

@@ -1,4 +1,17 @@
-import { dag, Container, Directory } from "@dagger.io/dagger"
+import { dag, Container, Directory, Service } from "@dagger.io/dagger"
+
+const DATABASE_URL = "postgres://iono:iono@postgres:5432/iono"
+
+function postgres(): Service {
+  return dag
+    .container()
+    .from("postgres:16")
+    .withEnvVariable("POSTGRES_USER", "iono")
+    .withEnvVariable("POSTGRES_PASSWORD", "iono")
+    .withEnvVariable("POSTGRES_DB", "iono")
+    .withExposedPort(5432)
+    .asService({ useEntrypoint: true })
+}
 
 export function rustChecks(source: Directory): Container {
   return dag
@@ -20,5 +33,7 @@ export function rustChecks(source: Directory): Container {
     .withMountedCache("/app/target", dag.cacheVolume("cargo-target"))
     .withExec(["cargo", "fmt", "--all", "--check"])
     .withExec(["cargo", "clippy", "--workspace", "--", "-D", "warnings"])
+    .withServiceBinding("postgres", postgres())
+    .withEnvVariable("DATABASE_URL", DATABASE_URL)
     .withExec(["cargo", "test", "--workspace"])
 }

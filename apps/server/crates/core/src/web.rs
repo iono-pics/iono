@@ -42,6 +42,12 @@ impl<T> Patch<T> {
     }
 }
 
+impl<T: std::ops::Deref> Patch<T> {
+    pub fn as_deref(&self) -> Option<&T::Target> {
+        self.as_set().map(|v| &**v)
+    }
+}
+
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for Patch<T> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

@@ -1,7 +1,6 @@
 use actix_web::{patch, web, HttpResponse};
 use iono_core::{
     entities::EmbedPreset,
-    validators,
     web::{ApiResult, MapDbError, OptionExt, Patch},
     AppError,
 };
@@ -10,7 +9,9 @@ use utoipa::ToSchema;
 use validator::Validate;
 
 use crate::{
-    auth::AuthedUser, routes::user::embeds::presets::EmbedPresetResponse, state::AppState,
+    auth::AuthedUser,
+    routes::user::embeds::presets::{EmbedPresetResponse, PresetFields},
+    state::AppState,
 };
 
 #[derive(Debug, Default, Deserialize, Validate, ToSchema)]
@@ -32,6 +33,23 @@ pub struct UpdateEmbedPresetRequest {
     description: Patch<String>,
     #[schema(value_type = Option<String>)]
     color: Patch<String>,
+}
+
+impl UpdateEmbedPresetRequest {
+    fn has_updates(&self) -> bool {
+        self.name.is_some()
+            || [
+                &self.site_name,
+                &self.site_url,
+                &self.author_name,
+                &self.author_url,
+                &self.title,
+                &self.description,
+                &self.color,
+            ]
+            .iter()
+            .any(|patch| patch.is_provided())
+    }
 }
 
 #[utoipa::path(
@@ -60,37 +78,18 @@ pub async fn update_embed_preset(
 
     let body = body.into_inner();
 
-    if let Some(site_name) = body.site_name.as_set() {
-        validators::text_length(site_name, 256, "site_name")?;
+    PresetFields {
+        site_name: body.site_name.as_deref(),
+        site_url: body.site_url.as_deref(),
+        author_name: body.author_name.as_deref(),
+        author_url: body.author_url.as_deref(),
+        title: body.title.as_deref(),
+        description: body.description.as_deref(),
+        color: body.color.as_deref(),
     }
-    if let Some(author_name) = body.author_name.as_set() {
-        validators::text_length(author_name, 256, "author_name")?;
-    }
-    if let Some(title) = body.title.as_set() {
-        validators::text_length(title, 256, "title")?;
-    }
-    if let Some(description) = body.description.as_set() {
-        validators::text_length(description, 1024, "description")?;
-    }
-    if let Some(site_url) = body.site_url.as_set() {
-        validators::http_url(site_url, 2048)?;
-    }
-    if let Some(author_url) = body.author_url.as_set() {
-        validators::http_url(author_url, 2048)?;
-    }
-    if let Some(color) = body.color.as_set() {
-        validators::hex_color(color)?;
-    }
+    .validate()?;
 
-    if body.name.is_none()
-        && !body.site_name.is_provided()
-        && !body.site_url.is_provided()
-        && !body.author_name.is_provided()
-        && !body.author_url.is_provided()
-        && !body.title.is_provided()
-        && !body.description.is_provided()
-        && !body.color.is_provided()
-    {
+    if !body.has_updates() {
         return Err(AppError::BadRequest("no fields to update".into()).into());
     }
 

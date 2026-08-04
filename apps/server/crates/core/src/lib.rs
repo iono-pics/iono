@@ -4,6 +4,7 @@ pub mod cloudflare;
 pub mod config;
 pub mod content_type;
 pub mod db;
+pub mod embed_vars;
 pub mod entities;
 pub mod error;
 pub mod oauth;
