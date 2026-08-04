@@ -13,14 +13,14 @@ use uuid::Uuid;
 
 use crate::{auth::AuthedUser, state::AppState};
 
-const MAX_CONTENT_LENGTH: usize = 1024 * 1024;
-
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreatePasteRequest {
     title: Option<String>,
     content: String,
     syntax: Option<String>,
     password: Option<String>,
+    #[serde(default)]
+    e2e_encrypted: bool,
 }
 
 #[utoipa::path(
@@ -41,7 +41,7 @@ pub async fn create_paste(
     body: web::Json<CreatePasteRequest>,
 ) -> ApiResult<HttpResponse> {
     let body = body.into_inner();
-    validate(&body)?;
+    validate(&body, state.config.max_paste_content_bytes)?;
 
     iono_core::quota::check_storage_quota(&state.db, &user.0.id, body.content.len() as i64).await?;
 
@@ -71,8 +71,8 @@ pub async fn create_paste(
         );
         paste = sqlx::query_as::<_, (String, String)>(
             r#"
-            INSERT INTO pastes (id, user_id, key, title, content, syntax, password_hash, expires_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO pastes (id, user_id, key, title, content, syntax, password_hash, expires_at, e2e_encrypted)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ON CONFLICT (key) DO NOTHING
             RETURNING id, key
             "#,
@@ -85,6 +85,7 @@ pub async fn create_paste(
         .bind(&body.syntax)
         .bind(&password_hash)
         .bind(expires_at)
+        .bind(body.e2e_encrypted)
         .fetch_optional(&state.db)
         .await
         .map_err(AppError::from)?;
@@ -127,18 +128,8 @@ pub async fn create_paste(
     })))
 }
 
-fn validate(body: &CreatePasteRequest) -> Result<(), AppError> {
-    if body.content.is_empty() {
-        return Err(AppError::BadRequest(
-            "paste content must not be empty".into(),
-        ));
-    }
-    if body.content.len() > MAX_CONTENT_LENGTH {
-        return Err(AppError::BadRequest(
-            "paste content must be at most 1 MiB".into(),
-        ));
-    }
-    validators::no_nul(&body.content, "paste content")?;
+fn validate(body: &CreatePasteRequest, max_bytes: usize) -> Result<(), AppError> {
+    validators::paste_content(&body.content, max_bytes, "paste content")?;
     if let Some(title) = &body.title {
         validators::text_length(title, 256, "paste title")?;
     }

@@ -3,6 +3,7 @@ pub mod bootstrap;
 pub mod cloudflare;
 pub mod config;
 pub mod content_type;
+pub mod crypto;
 pub mod db;
 pub mod embed_vars;
 pub mod entities;

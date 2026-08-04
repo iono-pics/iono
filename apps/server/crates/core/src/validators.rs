@@ -11,6 +11,19 @@ pub fn no_nul(value: &str, label: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+pub fn paste_content(value: &str, max_bytes: usize, label: &str) -> Result<(), AppError> {
+    if value.is_empty() {
+        return Err(AppError::BadRequest(format!("{label} must not be empty")));
+    }
+    if value.len() > max_bytes {
+        return Err(AppError::BadRequest(format!(
+            "{label} must be at most {} KiB",
+            max_bytes / 1024
+        )));
+    }
+    no_nul(value, label)
+}
+
 pub fn http_url(value: &str, max_len: usize) -> Result<(), AppError> {
     if value.len() > max_len {
         return Err(AppError::BadRequest(format!(

@@ -53,6 +53,8 @@ pub struct SettingsSummary {
     raw_links_only: bool,
     default_expires_in_seconds: Option<i64>,
     lossless_images: bool,
+    encrypt_uploads: bool,
+    encrypt_pastes: bool,
 }
 
 impl From<UserSettings> for SettingsSummary {
@@ -64,6 +66,8 @@ impl From<UserSettings> for SettingsSummary {
             raw_links_only: s.raw_links_only,
             default_expires_in_seconds: s.default_expires_in_seconds,
             lossless_images: s.lossless_images,
+            encrypt_uploads: s.encrypt_uploads,
+            encrypt_pastes: s.encrypt_pastes,
         }
     }
 }

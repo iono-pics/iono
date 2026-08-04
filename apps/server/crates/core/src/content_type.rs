@@ -1,6 +1,6 @@
 use std::io::Cursor;
 
-const FALLBACK_MIME_TYPE: &str = "application/octet-stream";
+pub const FALLBACK_MIME_TYPE: &str = "application/octet-stream";
 
 fn decode_limits() -> image::Limits {
     let mut limits = image::Limits::default();

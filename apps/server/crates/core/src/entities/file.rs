@@ -12,5 +12,9 @@ pub struct File {
     pub password_hash: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
     pub is_favourite: bool,
+    pub encrypted: bool,
+    pub encryption_iv: Option<Vec<u8>>,
+    pub user_key_iv: Option<Vec<u8>>,
+    pub user_key_hash: Option<String>,
     pub created_at: DateTime<Utc>,
 }

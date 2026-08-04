@@ -127,13 +127,19 @@ pub fn cors(methods: impl IntoIterator<Item = Method>) -> Cors {
 }
 
 pub fn append_password_query(base: &str, password: Option<&str>) -> String {
-    match password {
-        Some(p) => format!(
-            "{base}?password={}",
-            utf8_percent_encode(p, NON_ALPHANUMERIC)
-        ),
-        None => base.to_string(),
+    append_query(base, &[("password", password)])
+}
+
+pub fn append_query(base: &str, params: &[(&str, Option<&str>)]) -> String {
+    let mut url = base.to_string();
+    for (name, value) in params {
+        let Some(value) = value else { continue };
+        url.push(if url.contains('?') { '&' } else { '?' });
+        url.push_str(name);
+        url.push('=');
+        url.push_str(&utf8_percent_encode(value, NON_ALPHANUMERIC).to_string());
     }
+    url
 }
 
 pub fn state_and_bearer<T: 'static>(

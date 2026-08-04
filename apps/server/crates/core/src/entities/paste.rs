@@ -10,5 +10,6 @@ pub struct Paste {
     pub syntax: Option<String>,
     pub password_hash: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
+    pub e2e_encrypted: bool,
     pub created_at: DateTime<Utc>,
 }

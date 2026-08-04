@@ -25,7 +25,7 @@ async fn main() -> std::io::Result<()> {
     tracing::info!("iono-ingest listening on http://{}:{}", host, port);
 
     let state = web::Data::new(state);
-    let governor = routes::rate_limit::ingest_governor(config.jwt_secret.expose_secret());
+    let governor = routes::rate_limit::ingest_governor(&config, config.jwt_secret.expose_secret());
 
     HttpServer::new(move || {
         let governor = governor.clone();

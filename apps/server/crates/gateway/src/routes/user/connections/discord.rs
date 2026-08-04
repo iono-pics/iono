@@ -30,6 +30,7 @@ pub async fn start_link_discord(
         &flow.csrf_token,
         &flow.pkce_verifier,
         Some(&user.0.id),
+        state.config.oauth_flow_state_ttl_minutes,
     )
     .await?;
 

@@ -15,12 +15,19 @@ use serde::Deserialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-const RECOVERY_CODE_COUNT: usize = 10;
-
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ReauthRequest {
     password: Option<String>,
     totp_code: Option<String>,
+}
+
+impl ReauthRequest {
+    pub(crate) fn new(password: Option<String>, totp_code: Option<String>) -> Self {
+        Self {
+            password,
+            totp_code,
+        }
+    }
 }
 
 pub(crate) async fn require_reauth(user: &User, req: &ReauthRequest) -> Result<(), AppError> {
@@ -50,6 +57,7 @@ pub(crate) async fn require_reauth(user: &User, req: &ReauthRequest) -> Result<(
 async fn replace_recovery_codes(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     user_id: &str,
+    count: usize,
 ) -> Result<Vec<String>, AppError> {
     sqlx::query("DELETE FROM totp_recovery_codes WHERE user_id = $1")
         .bind(user_id)
@@ -57,8 +65,8 @@ async fn replace_recovery_codes(
         .await
         .map_err(AppError::from)?;
 
-    let mut codes = Vec::with_capacity(RECOVERY_CODE_COUNT);
-    for _ in 0..RECOVERY_CODE_COUNT {
+    let mut codes = Vec::with_capacity(count);
+    for _ in 0..count {
         let code = token::generate_recovery_code();
         let code_hash = hash_password_async(code.clone()).await?;
 

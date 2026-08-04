@@ -12,8 +12,6 @@ use utoipa::ToSchema;
 
 use crate::{auth::AuthedUser, routes::user::pastes::list::PasteSummary, state::AppState};
 
-const MAX_CONTENT_LENGTH: usize = 1024 * 1024;
-
 #[derive(Debug, Default, Deserialize, ToSchema)]
 #[serde(default)]
 pub struct UpdatePasteRequest {
@@ -50,7 +48,7 @@ pub async fn update_paste(
     body: web::Json<UpdatePasteRequest>,
 ) -> ApiResult<HttpResponse> {
     let body = body.into_inner();
-    validate(&body)?;
+    validate(&body, state.config.max_paste_content_bytes)?;
 
     if !body.title.is_provided()
         && body.content.is_none()
@@ -134,15 +132,9 @@ pub async fn update_paste(
     Ok(HttpResponse::Ok().json(PasteSummary::from(paste)))
 }
 
-fn validate(body: &UpdatePasteRequest) -> Result<(), AppError> {
+fn validate(body: &UpdatePasteRequest, max_bytes: usize) -> Result<(), AppError> {
     if let Some(content) = &body.content {
-        if content.is_empty() {
-            return Err(AppError::BadRequest("content must not be empty".into()));
-        }
-        if content.len() > MAX_CONTENT_LENGTH {
-            return Err(AppError::BadRequest("content must be at most 1 MiB".into()));
-        }
-        validators::no_nul(content, "content")?;
+        validators::paste_content(content, max_bytes, "content")?;
     }
 
     if let Some(title) = body.title.as_set() {

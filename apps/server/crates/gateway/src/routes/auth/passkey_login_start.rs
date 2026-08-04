@@ -62,6 +62,7 @@ pub async fn passkey_login_start(
         Some(&user.id),
         webauthn::PASSKEY_LOGIN_PURPOSE,
         &auth_state,
+        state.config.webauthn_ceremony_ttl_minutes,
     )
     .await?;
 

@@ -3,14 +3,15 @@ use actix_web::{post, web, HttpResponse};
 use chrono::{Duration, Utc};
 use iono_core::{
     auth::{password::hash_password_async, token},
-    content_type,
+    content_type, crypto,
     entities::{File, UserSettings},
-    AppError,
+    validators, AppError,
 };
+use secrecy::ExposeSecret;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use iono_core::web::{append_password_query, ApiResult};
+use iono_core::web::{append_query, ApiResult};
 
 use crate::{auth::ApiKeyUser, state::AppState};
 
@@ -29,9 +30,10 @@ pub struct UploadForm {
     security(("bearer_auth" = [])),
     responses(
         (status = 201, description = "file uploaded"),
-        (status = 400, description = "missing or malformed file"),
+        (status = 400, description = "missing or malformed file, or an invalid password"),
         (status = 401, description = "missing or invalid api key"),
-        (status = 402, description = "plan size or storage quota exceeded")
+        (status = 402, description = "plan size or storage quota exceeded"),
+        (status = 415, description = "body was not multipart/form-data")
     )
 )]
 #[post("/")]
@@ -50,6 +52,9 @@ pub async fn upload_file(
         .password
         .map(|t| t.into_inner())
         .filter(|p| !p.is_empty());
+    if let Some(password) = plain_password.as_deref() {
+        validators::password(password, 256)?;
+    }
     let password_hash = match plain_password.clone() {
         Some(p) => Some(hash_password_async(p).await?),
         None => None,
@@ -75,6 +80,29 @@ pub async fn upload_file(
     })
     .await
     .map_err(|e| AppError::internal_from("content-type detection task panicked", e))?;
+
+    let mut data = data.to_vec();
+
+    let (user_key, user_key_iv, user_key_hash) = if settings.encrypt_uploads {
+        let key = crypto::random_key();
+        let iv = crypto::random_iv();
+        crypto::encrypt_buffer(&key, &iv, &mut data)?;
+        let hash = hash_password_async(crypto::encode_key(&key)).await?;
+        (
+            Some(crypto::encode_key(&key)),
+            Some(iv.to_vec()),
+            Some(hash),
+        )
+    } else {
+        (None, None, None)
+    };
+
+    let global_key = crypto::parse_key(state.config.file_encryption_key.expose_secret())?;
+    let encryption_iv = crypto::random_iv();
+
+    crypto::encrypt_buffer(&global_key, &encryption_iv, &mut data)?;
+
+    let encryption_iv = encryption_iv.to_vec();
 
     let id = Uuid::new_v4().to_string();
     let extension = content_type::extension_for(&mime_type);
@@ -105,8 +133,8 @@ pub async fn upload_file(
 
         sqlx::query_as::<_, File>(
             r#"
-            INSERT INTO files (id, user_id, display_name, original_name, content_type, size_bytes, password_hash, expires_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO files (id, user_id, display_name, original_name, content_type, size_bytes, password_hash, expires_at, encrypted, encryption_iv, user_key_iv, user_key_hash)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             RETURNING *
             "#,
         )
@@ -118,6 +146,10 @@ pub async fn upload_file(
         .bind(size_bytes)
         .bind(&password_hash)
         .bind(expires_at)
+        .bind(user_key_hash.is_some())
+        .bind(&encryption_iv)
+        .bind(&user_key_iv)
+        .bind(&user_key_hash)
         .fetch_one(&db)
         .await
         .map_err(AppError::from)
@@ -150,7 +182,14 @@ pub async fn upload_file(
     } else {
         format!("https://{files_domain}/{prefix}{}", file.display_name)
     };
-    let url = append_password_query(&base_url, plain_password.as_deref());
+
+    let url = append_query(
+        &base_url,
+        &[
+            ("password", plain_password.as_deref()),
+            ("key", user_key.as_deref()),
+        ],
+    );
 
     Ok(HttpResponse::Created().json(serde_json::json!({ "url": url })))
 }

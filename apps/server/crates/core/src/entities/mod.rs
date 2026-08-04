@@ -29,5 +29,5 @@ pub use short_link::ShortLink;
 pub use stripe_event::StripeEvent;
 pub use subscription::{Subscription, SubscriptionStatus};
 pub use totp_recovery_code::TotpRecoveryCode;
-pub use user::{User, RECOVERY_WINDOW_DAYS};
+pub use user::User;
 pub use user_settings::{DisplayNameStyle, UserSettings};

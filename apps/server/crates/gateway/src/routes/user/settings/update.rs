@@ -43,6 +43,8 @@ pub struct UpdateSettingsRequest {
     raw_links_only: Option<bool>,
     default_expires_in_seconds: Option<SelfDestructDuration>,
     lossless_images: Option<bool>,
+    encrypt_uploads: Option<bool>,
+    encrypt_pastes: Option<bool>,
 }
 
 #[utoipa::path(
@@ -74,6 +76,8 @@ pub async fn update_settings(
         && body.raw_links_only.is_none()
         && !expires_provided
         && body.lossless_images.is_none()
+        && body.encrypt_uploads.is_none()
+        && body.encrypt_pastes.is_none()
     {
         return Err(AppError::BadRequest("no settings fields provided".into()).into());
     }
@@ -91,8 +95,10 @@ pub async fn update_settings(
             display_name_include_extension = COALESCE($3, display_name_include_extension),
             raw_links_only = COALESCE($4, raw_links_only),
             default_expires_in_seconds = CASE WHEN $5 THEN $6 ELSE default_expires_in_seconds END,
-            lossless_images = COALESCE($7, lossless_images)
-        WHERE user_id = $8
+            lossless_images = COALESCE($7, lossless_images),
+            encrypt_uploads = COALESCE($8, encrypt_uploads),
+            encrypt_pastes = COALESCE($9, encrypt_pastes)
+        WHERE user_id = $10
         "#,
     )
     .bind(body.display_name_length)
@@ -102,6 +108,8 @@ pub async fn update_settings(
     .bind(expires_provided)
     .bind(expires_seconds)
     .bind(body.lossless_images)
+    .bind(body.encrypt_uploads)
+    .bind(body.encrypt_pastes)
     .bind(&user.0.id)
     .execute(&state.db)
     .await

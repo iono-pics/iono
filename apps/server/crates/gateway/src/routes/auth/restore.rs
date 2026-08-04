@@ -1,10 +1,5 @@
 use actix_web::{post, web, HttpResponse};
-use iono_core::{
-    auth::jwt,
-    entities::{User, RECOVERY_WINDOW_DAYS},
-    web::ApiResult,
-    AppError,
-};
+use iono_core::{auth::jwt, entities::User, web::ApiResult, AppError};
 use secrecy::ExposeSecret;
 use serde::Deserialize;
 use serde_json::json;
@@ -46,9 +41,10 @@ pub async fn restore(
         return Err(AppError::Unauthorized.into());
     }
 
-    if user.is_permanently_deleted() {
+    if user.is_permanently_deleted(state.config.recovery_window_days) {
         return Err(AppError::Gone(format!(
-            "recovery window of {RECOVERY_WINDOW_DAYS} days has expired"
+            "recovery window of {} days has expired",
+            state.config.recovery_window_days
         ))
         .into());
     }

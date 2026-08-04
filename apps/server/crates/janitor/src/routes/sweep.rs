@@ -1,6 +1,6 @@
 use actix_web::{post, web, HttpResponse};
 use actix_web_httpauth::extractors::bearer::BearerAuth;
-use iono_core::{entities::RECOVERY_WINDOW_DAYS, AppError};
+use iono_core::AppError;
 use secrecy::ExposeSecret;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,8 +8,6 @@ use std::time::Instant;
 use subtle::ConstantTimeEq;
 
 use crate::state::AppState;
-
-const BATCH_SIZE: i64 = 500;
 
 static SWEEP_RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -72,7 +70,7 @@ async fn run_sweep(state: &AppState) -> Result<(u64, u64), AppError> {
             LIMIT $1
             "#,
         )
-        .bind(BATCH_SIZE)
+        .bind(state.core.config.sweep_batch_size)
         .fetch_all(&state.core.db)
         .await?;
 
@@ -157,8 +155,8 @@ async fn purge_expired_deletions(state: &AppState) -> Result<(u64, u64), AppErro
         LIMIT $2
         "#,
     )
-    .bind(RECOVERY_WINDOW_DAYS as i32)
-    .bind(BATCH_SIZE)
+    .bind(state.core.config.recovery_window_days as i32)
+    .bind(state.core.config.sweep_batch_size)
     .fetch_all(&state.core.db)
     .await?;
 

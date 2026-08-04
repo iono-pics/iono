@@ -4,8 +4,6 @@ use serde::{de::DeserializeOwned, Serialize};
 use sqlx::{types::Json, FromRow, PgPool};
 use uuid::Uuid;
 
-const CEREMONY_TTL_MINUTES: i64 = 5;
-
 #[derive(FromRow)]
 struct StoredCeremony {
     user_id: Option<String>,
@@ -17,6 +15,7 @@ pub async fn create<T: Serialize>(
     user_id: Option<&str>,
     purpose: &str,
     state: &T,
+    ttl_minutes: i64,
 ) -> Result<String, AppError> {
     let token = Uuid::new_v4().to_string();
     let state = serde_json::to_value(state)
@@ -34,7 +33,7 @@ pub async fn create<T: Serialize>(
     .bind(user_id)
     .bind(purpose)
     .bind(Json(state))
-    .bind(Utc::now() + Duration::minutes(CEREMONY_TTL_MINUTES))
+    .bind(Utc::now() + Duration::minutes(ttl_minutes))
     .execute(db)
     .await
     .map_err(AppError::from)?;

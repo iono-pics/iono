@@ -125,8 +125,8 @@ async fn openapi_spec() -> web::Json<utoipa::openapi::OpenApi> {
     web::Json(ApiDoc::openapi())
 }
 
-pub fn configure(cfg: &mut web::ServiceConfig) {
-    cfg.service(auth::scope())
-        .service(user::scope())
+pub fn configure(cfg: &mut web::ServiceConfig, governor: &rate_limit::AuthGovernor) {
+    cfg.service(auth::scope(governor))
+        .service(user::scope(governor))
         .service(openapi_spec);
 }

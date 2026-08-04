@@ -1,5 +1,9 @@
 use actix_web::{get, web, HttpResponse};
-use iono_core::{entities::Folder, web::ApiResult, AppError};
+use iono_core::{
+    entities::Folder,
+    web::{ApiResult, Page},
+    AppError,
+};
 use serde::Deserialize;
 use sqlx::QueryBuilder;
 
@@ -10,6 +14,8 @@ pub struct ListFoldersQuery {
     /// filter folders under a specific parent or "root" for top level folders
     /// omit for entire tree
     parent_id: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
 }
 
 #[utoipa::path(
@@ -18,9 +24,12 @@ pub struct ListFoldersQuery {
     security(("bearer_auth" = [])),
     params(
         ("parent_id" = Option<String>, Query, description = "filter to a parent folder id, or \"root\" for top level folders"),
+        ("limit" = Option<i64>, Query, description = "page size, 1-500 (default 200)"),
+        ("offset" = Option<i64>, Query, description = "offset for pagination, default 0"),
     ),
     responses(
         (status = 200, description = "the caller's folders", body = [FolderSummary]),
+        (status = 400, description = "invalid query parameters"),
         (status = 401, description = "missing or invalid token"),
     )
 )]
@@ -46,7 +55,16 @@ pub async fn list_folders(
         None => {}
     }
 
-    sql.push(" ORDER BY name ASC");
+    let (limit, offset) = Page {
+        limit: query.limit,
+        offset: query.offset,
+    }
+    .resolve(200, 500);
+
+    sql.push(" ORDER BY name ASC LIMIT ")
+        .push_bind(limit)
+        .push(" OFFSET ")
+        .push_bind(offset);
 
     let folders = sql
         .build_query_as::<Folder>()

@@ -1,6 +1,5 @@
 use actix_web::{delete, web, HttpResponse};
 use iono_core::{
-    entities::RECOVERY_WINDOW_DAYS,
     web::{ApiResult, MapDbError},
     AppError,
 };
@@ -18,10 +17,10 @@ use crate::{
     request_body = ReauthRequest,
     security(("bearer_auth" = [])),
     responses(
-        (status = 200, description = "account soft-deleted; body reports the recovery deadline"),
+        (status = 200, description = "account soft-deleted, body reports the recovery deadline"),
         (status = 400, description = "reauth details missing"),
         (status = 401, description = "reauth failed"),
-        (status = 409, description = "active subscription — cancel first"),
+        (status = 409, description = "active subscription, cancel first"),
     )
 )]
 #[delete("/@me")]
@@ -66,7 +65,7 @@ pub async fn delete_account(
     .await
     .map_err(MapDbError::new().build())?;
 
-    let recoverable_until = deleted_at + chrono::Duration::days(RECOVERY_WINDOW_DAYS);
+    let recoverable_until = deleted_at + chrono::Duration::days(state.config.recovery_window_days);
 
     Ok(HttpResponse::Ok().json(json!({
         "status": "pending_deletion",

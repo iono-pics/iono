@@ -13,8 +13,8 @@ use crate::{
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RequirePasskeyRequest {
     required: bool,
-    #[serde(flatten)]
-    reauth: ReauthRequest,
+    password: Option<String>,
+    totp_code: Option<String>,
 }
 
 #[utoipa::path(
@@ -34,7 +34,8 @@ pub async fn require_passkey(
     user: JwtUser,
     body: web::Json<RequirePasskeyRequest>,
 ) -> ApiResult<HttpResponse> {
-    require_reauth(&user.0, &body.reauth).await?;
+    let reauth = ReauthRequest::new(body.password.clone(), body.totp_code.clone());
+    require_reauth(&user.0, &reauth).await?;
 
     if body.required {
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM passkeys WHERE user_id = $1")

@@ -21,7 +21,6 @@ use crate::{
 };
 
 const PROVIDER: &str = "discord";
-const FLOW_STATE_TTL_MINUTES: i64 = 15;
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DiscordAuthResponse {
@@ -219,8 +218,9 @@ pub(crate) async fn store_flow_state(
     csrf_token: &str,
     pkce_verifier: &str,
     link_user_id: Option<&str>,
+    ttl_minutes: i64,
 ) -> Result<(), AppError> {
-    let expires_at = Utc::now() + Duration::minutes(FLOW_STATE_TTL_MINUTES);
+    let expires_at = Utc::now() + Duration::minutes(ttl_minutes);
     sqlx::query(
         r#"
         INSERT INTO oauth_flow_states (id, provider, pkce_verifier, link_user_id, expires_at)

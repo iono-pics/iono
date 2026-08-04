@@ -3,6 +3,8 @@ use iono_core::{embed_vars::EMBED_VARIABLES, web::ApiResult};
 use serde::Serialize;
 use utoipa::ToSchema;
 
+use crate::auth::AuthedUser;
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct EmbedVariableSummary {
     placeholder: String,
@@ -20,7 +22,7 @@ pub struct EmbedVariableSummary {
     )
 )]
 #[get("/embeds/variables")]
-pub async fn list_embed_variables() -> ApiResult<HttpResponse> {
+pub async fn list_embed_variables(_user: AuthedUser) -> ApiResult<HttpResponse> {
     let variables = EMBED_VARIABLES
         .iter()
         .map(|v| EmbedVariableSummary {

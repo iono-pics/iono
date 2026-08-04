@@ -29,7 +29,8 @@ pub async fn regenerate_recovery_codes(
 
     let mut tx = state.db.begin().await.map_err(AppError::from)?;
 
-    let recovery_codes = replace_recovery_codes(&mut tx, &user.0.id).await?;
+    let recovery_codes =
+        replace_recovery_codes(&mut tx, &user.0.id, state.config.totp_recovery_code_count).await?;
 
     sqlx::query("UPDATE users SET token_version = $1 WHERE id = $2")
         .bind(new_token_version)

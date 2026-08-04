@@ -21,9 +21,9 @@ use actix_governor::Governor;
 use actix_web::dev::HttpServiceFactory;
 use actix_web::web;
 
-use crate::routes::rate_limit::AUTH_GOVERNOR;
+use crate::routes::rate_limit::AuthGovernor;
 
-pub fn scope() -> impl HttpServiceFactory {
+pub fn scope(governor: &AuthGovernor) -> impl HttpServiceFactory {
     web::scope("/user")
         .service(me::me)
         .service(api_keys::regenerate_apikey)
@@ -58,7 +58,7 @@ pub fn scope() -> impl HttpServiceFactory {
         .service(connections::discord::start_link_discord)
         .service(
             web::scope("")
-                .wrap(Governor::new(&AUTH_GOVERNOR))
+                .wrap(Governor::new(governor))
                 .service(change_password::change_password)
                 .service(delete_account::delete_account)
                 .service(redeem::redeem_code)

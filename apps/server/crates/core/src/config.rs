@@ -23,6 +23,28 @@ pub struct Config {
     pub jwt_secret: SecretString,
     pub jwt_access_ttl_minutes: i64,
 
+    pub auth_rate_limit_seconds_per_request: u64,
+    pub auth_rate_limit_burst: u32,
+
+    pub ingest_rate_limit_seconds_per_request: u64,
+    pub ingest_rate_limit_burst: u32,
+
+    pub file_encryption_key: SecretString,
+
+    pub recovery_window_days: i64,
+    pub totp_recovery_code_count: usize,
+
+    pub oauth_flow_state_ttl_minutes: i64,
+    pub webauthn_ceremony_ttl_minutes: i64,
+
+    pub max_paste_content_bytes: usize,
+
+    pub sweep_batch_size: i64,
+    pub encrypt_backfill_batch_size: i64,
+
+    pub browser_cache_max_age_seconds: u32,
+    pub edge_cache_max_age_seconds: u32,
+
     pub webauthn_rp_id: String,
     pub webauthn_rp_origin: String,
 
@@ -83,6 +105,63 @@ impl Config {
             jwt_access_ttl_minutes: env_or("JWT_ACCESS_TTL_MINUTES", "1440")
                 .parse()
                 .expect("JWT_ACCESS_TTL_MINUTES malformed"),
+
+            auth_rate_limit_seconds_per_request: env_or("AUTH_RATE_LIMIT_SECONDS_PER_REQUEST", "2")
+                .parse()
+                .expect("AUTH_RATE_LIMIT_SECONDS_PER_REQUEST malformed"),
+            auth_rate_limit_burst: env_or("AUTH_RATE_LIMIT_BURST", "5")
+                .parse()
+                .expect("AUTH_RATE_LIMIT_BURST malformed"),
+            ingest_rate_limit_seconds_per_request: env_or(
+                "INGEST_RATE_LIMIT_SECONDS_PER_REQUEST",
+                "1",
+            )
+            .parse()
+            .expect("INGEST_RATE_LIMIT_SECONDS_PER_REQUEST malformed"),
+            ingest_rate_limit_burst: env_or("INGEST_RATE_LIMIT_BURST", "30")
+                .parse()
+                .expect("INGEST_RATE_LIMIT_BURST malformed"),
+
+            file_encryption_key: SecretString::from({
+                let key = env::var("FILE_ENCRYPTION_KEY")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .expect("FILE_ENCRYPTION_KEY must be set");
+                crate::crypto::parse_key(&key).expect("FILE_ENCRYPTION_KEY malformed");
+                key
+            }),
+
+            recovery_window_days: env_or("RECOVERY_WINDOW_DAYS", "30")
+                .parse()
+                .expect("RECOVERY_WINDOW_DAYS malformed"),
+            totp_recovery_code_count: env_or("TOTP_RECOVERY_CODE_COUNT", "10")
+                .parse()
+                .expect("TOTP_RECOVERY_CODE_COUNT malformed"),
+            oauth_flow_state_ttl_minutes: env_or("OAUTH_FLOW_STATE_TTL_MINUTES", "15")
+                .parse()
+                .expect("OAUTH_FLOW_STATE_TTL_MINUTES malformed"),
+            webauthn_ceremony_ttl_minutes: env_or("WEBAUTHN_CEREMONY_TTL_MINUTES", "5")
+                .parse()
+                .expect("WEBAUTHN_CEREMONY_TTL_MINUTES malformed"),
+
+            max_paste_content_bytes: env_or("MAX_PASTE_SIZE_KB", "1024")
+                .parse::<usize>()
+                .expect("MAX_PASTE_SIZE_KB malformed")
+                * 1024,
+
+            sweep_batch_size: env_or("SWEEP_BATCH_SIZE", "500")
+                .parse()
+                .expect("SWEEP_BATCH_SIZE malformed"),
+            encrypt_backfill_batch_size: env_or("ENCRYPT_BACKFILL_BATCH_SIZE", "100")
+                .parse()
+                .expect("ENCRYPT_BACKFILL_BATCH_SIZE malformed"),
+
+            browser_cache_max_age_seconds: env_or("BROWSER_CACHE_MAX_AGE_SECONDS", "300")
+                .parse()
+                .expect("BROWSER_CACHE_MAX_AGE_SECONDS malformed"),
+            edge_cache_max_age_seconds: env_or("EDGE_CACHE_MAX_AGE_SECONDS", "31536000")
+                .parse()
+                .expect("EDGE_CACHE_MAX_AGE_SECONDS malformed"),
 
             webauthn_rp_id: env_or("WEBAUTHN_RP_ID", "localhost"),
             webauthn_rp_origin: env_or("WEBAUTHN_RP_ORIGIN", "http://localhost:5173"),

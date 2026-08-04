@@ -21,6 +21,8 @@ pub struct UserSettings {
     pub raw_links_only: bool,
     pub default_expires_in_seconds: Option<i64>,
     pub lossless_images: bool,
+    pub encrypt_uploads: bool,
+    pub encrypt_pastes: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

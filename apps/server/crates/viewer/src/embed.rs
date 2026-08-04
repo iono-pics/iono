@@ -5,14 +5,14 @@ use iono_core::{
 };
 use maud::{html, PreEscaped, DOCTYPE};
 
-const DEFAULT_SITE_NAME: &str = "iono";
-const DEFAULT_COLOR: &str = "#7c3aed";
+use crate::csp;
 
 pub fn render_embed_html(
     file: &File,
     uploader: &str,
     raw_url: &str,
     preset: Option<&EmbedPreset>,
+    nonce: &csp::Nonce,
 ) -> String {
     let is_image = file.content_type.starts_with("image/");
     let is_video = file.content_type.starts_with("video/");
@@ -38,13 +38,10 @@ pub fn render_embed_html(
     let title = resolve(preset.and_then(|p| p.title.as_deref()))
         .unwrap_or_else(|| file.display_name.clone());
     let description = resolve(preset.and_then(|p| p.description.as_deref())).unwrap_or_default();
-    let site_name = resolve(preset.and_then(|p| p.site_name.as_deref()))
-        .unwrap_or_else(|| DEFAULT_SITE_NAME.to_owned());
-    let color = sanitize_color(
-        preset
-            .and_then(|p| p.color.as_deref())
-            .unwrap_or(DEFAULT_COLOR),
-    );
+    let site_name = resolve(preset.and_then(|p| p.site_name.as_deref()));
+    let color = preset
+        .and_then(|p| p.color.as_deref())
+        .and_then(sanitize_color);
     let author = resolve(preset.and_then(|p| p.author_name.as_deref()));
 
     html! {
@@ -54,10 +51,14 @@ pub fn render_embed_html(
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { (title) }
-                meta property="og:site_name" content=(site_name);
+                @if let Some(site_name) = &site_name {
+                    meta property="og:site_name" content=(site_name);
+                }
                 meta property="og:title" content=(title);
                 meta property="og:description" content=(description);
-                meta name="theme-color" content=(color);
+                @if let Some(color) = color {
+                    meta name="theme-color" content=(color);
+                }
                 @if is_image {
                     meta property="og:image" content=(raw_url);
                     meta name="twitter:card" content="summary_large_image";
@@ -71,7 +72,7 @@ pub fn render_embed_html(
                 @if let Some(author) = author {
                     meta name="twitter:creator" content=(author);
                 }
-                style { (PreEscaped(page_css(color))) }
+                style nonce=(nonce.value()) { (PreEscaped(page_css(color))) }
             }
             body {
                 @if is_image {
@@ -88,7 +89,8 @@ pub fn render_embed_html(
     .into_string()
 }
 
-fn page_css(color: &str) -> String {
+fn page_css(color: Option<&str>) -> String {
+    let color = color.unwrap_or("inherit");
     format!(
         r#"
 :root {{ color-scheme: light dark; }}
@@ -124,14 +126,14 @@ body {{
     )
 }
 
-fn sanitize_color(color: &str) -> &str {
+fn sanitize_color(color: &str) -> Option<&str> {
     match color.strip_prefix('#') {
         Some(hex)
             if matches!(hex.len(), 3 | 4 | 6 | 8) && hex.chars().all(|c| c.is_ascii_hexdigit()) =>
         {
-            color
+            Some(color)
         }
-        _ => DEFAULT_COLOR,
+        _ => None,
     }
 }
 
@@ -152,6 +154,10 @@ mod tests {
             password_hash: None,
             expires_at: None,
             is_favourite: false,
+            encrypted: false,
+            encryption_iv: None,
+            user_key_iv: None,
+            user_key_hash: None,
             created_at: Utc::now(),
         }
     }
@@ -181,6 +187,7 @@ mod tests {
             "cat",
             "/raw/abc123.png",
             Some(&preset),
+            &csp::Nonce::new(),
         );
         assert!(!html.contains("<script>"));
         assert!(html.contains("&lt;script&gt;"));
@@ -194,21 +201,84 @@ mod tests {
             "cat",
             "/raw/abc123.png",
             Some(&preset),
+            &csp::Nonce::new(),
         );
         assert!(!html.contains("<script>alert"));
-        assert!(html.contains(DEFAULT_COLOR));
+        assert!(!html.contains("theme-color"), "{html}");
+    }
+
+    /// without a preset the page carries no branding of ours at all, so the
+    /// consumer falls back to the user's own domain
+    #[test]
+    fn no_preset_means_no_site_name_or_theme_colour() {
+        let html = render_embed_html(
+            &test_file("image/png"),
+            "cat",
+            "/raw/abc123.png",
+            None,
+            &csp::Nonce::new(),
+        );
+
+        assert!(!html.contains("og:site_name"), "{html}");
+        assert!(!html.contains("theme-color"), "{html}");
+        assert!(!html.contains("iono"), "{html}");
+        assert!(!html.contains("7c3aed"), "{html}");
+    }
+
+    #[test]
+    fn a_preset_colour_still_reaches_the_page() {
+        let preset = test_preset("t", "#abcdef");
+        let html = render_embed_html(
+            &test_file("image/png"),
+            "cat",
+            "/raw/abc123.png",
+            Some(&preset),
+            &csp::Nonce::new(),
+        );
+
+        assert!(html.contains(r##"content="#abcdef""##), "{html}");
+        assert!(html.contains("color: #abcdef"), "{html}");
     }
 
     #[test]
     fn image_files_get_og_image_tags() {
-        let html = render_embed_html(&test_file("image/png"), "cat", "/raw/abc123.png", None);
+        let html = render_embed_html(
+            &test_file("image/png"),
+            "cat",
+            "/raw/abc123.png",
+            None,
+            &csp::Nonce::new(),
+        );
         assert!(html.contains(r#"property="og:image" content="/raw/abc123.png""#));
         assert!(html.contains("summary_large_image"));
     }
 
     #[test]
+    fn encrypted_files_still_preview() {
+        let mut file = test_file("image/png");
+        file.encrypted = true;
+
+        let html = render_embed_html(
+            &file,
+            "cat",
+            "/raw/abc123.png?key=meow",
+            None,
+            &csp::Nonce::new(),
+        );
+
+        assert!(html.contains("og:image"), "{html}");
+        assert!(html.contains("key=meow"), "{html}");
+    }
+
+    #[test]
     fn video_files_get_player_tags() {
-        let html = render_embed_html(&test_file("video/mp4"), "cat", "/raw/abc123.mp4", None);
+        let html = render_embed_html(
+            &test_file("video/mp4"),
+            "cat",
+            "/raw/abc123.mp4",
+            None,
+            &csp::Nonce::new(),
+        );
         assert!(html.contains(r#"property="og:video""#));
         assert!(html.contains(r#"content="video/mp4""#));
         assert!(html.contains("<video"));
@@ -223,6 +293,7 @@ mod tests {
             "cat",
             "/raw/abc123.png",
             Some(&preset),
+            &csp::Nonce::new(),
         );
 
         assert!(
@@ -240,7 +311,13 @@ mod tests {
         let mut file = test_file("image/png");
         file.display_name = "<script>alert(1)</script>.png".into();
         let preset = test_preset("{filename}", "#fff");
-        let html = render_embed_html(&file, "cat", "/raw/abc123.png", Some(&preset));
+        let html = render_embed_html(
+            &file,
+            "cat",
+            "/raw/abc123.png",
+            Some(&preset),
+            &csp::Nonce::new(),
+        );
 
         assert!(!html.contains("<script>alert"));
         assert!(html.contains("&lt;script&gt;"));

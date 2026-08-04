@@ -1,8 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 
-pub const RECOVERY_WINDOW_DAYS: i64 = 30;
-
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct User {
     pub id: String,
@@ -26,18 +24,17 @@ pub struct User {
 }
 
 impl User {
-    pub fn recoverable_until(&self) -> Option<DateTime<Utc>> {
-        self.deleted_at
-            .map(|at| at + Duration::days(RECOVERY_WINDOW_DAYS))
+    pub fn recoverable_until(&self, window_days: i64) -> Option<DateTime<Utc>> {
+        self.deleted_at.map(|at| at + Duration::days(window_days))
     }
 
-    pub fn is_pending_deletion(&self) -> bool {
-        self.recoverable_until()
+    pub fn is_pending_deletion(&self, window_days: i64) -> bool {
+        self.recoverable_until(window_days)
             .is_some_and(|until| Utc::now() < until)
     }
 
-    pub fn is_permanently_deleted(&self) -> bool {
-        self.recoverable_until()
+    pub fn is_permanently_deleted(&self, window_days: i64) -> bool {
+        self.recoverable_until(window_days)
             .is_some_and(|until| Utc::now() >= until)
     }
 }

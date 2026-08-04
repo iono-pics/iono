@@ -15,7 +15,7 @@ use iono_core::{auth::jwt, entities::User, AppError};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 
-use crate::routes::rate_limit::AUTH_GOVERNOR;
+use crate::routes::rate_limit::AuthGovernor;
 
 pub(crate) struct MfaChallenge {
     mfa_token: String,
@@ -69,9 +69,9 @@ pub(crate) async fn mfa_challenge(
     }))
 }
 
-pub fn scope() -> impl HttpServiceFactory {
+pub fn scope(governor: &AuthGovernor) -> impl HttpServiceFactory {
     web::scope("/auth")
-        .wrap(Governor::new(&AUTH_GOVERNOR))
+        .wrap(Governor::new(governor))
         .service(signup::signup)
         .service(login::login)
         .service(verify_totp::verify_login_totp)

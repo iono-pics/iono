@@ -1,10 +1,9 @@
 use actix_web::{get, http::header, web, HttpResponse};
-use chrono::Utc;
 use iono_core::{auth::password::verify_password_async, entities::Paste, web::ApiResult, AppError};
-use maud::{html, DOCTYPE};
+use maud::{html, PreEscaped, DOCTYPE};
 use serde::Deserialize;
 
-use crate::state::AppState;
+use crate::{cache, csp, state::AppState};
 
 #[derive(Deserialize)]
 pub struct PasteQuery {
@@ -18,7 +17,7 @@ pub async fn view_paste(
     query: web::Query<PasteQuery>,
 ) -> ApiResult<HttpResponse> {
     let paste = fetch_paste(&state, &path.into_inner()).await?;
-    render_paste(paste, &query).await
+    render_paste(&state, paste, &query).await
 }
 
 #[get("/p/{prefix}/{key}")]
@@ -29,21 +28,32 @@ pub async fn view_paste_with_prefix(
 ) -> ApiResult<HttpResponse> {
     let (prefix, key) = path.into_inner();
     let paste = fetch_paste_with_prefix(&state, &prefix, &key).await?;
-    render_paste(paste, &query).await
+    render_paste(&state, paste, &query).await
 }
 
-async fn render_paste(paste: Paste, query: &PasteQuery) -> ApiResult<HttpResponse> {
+async fn render_paste(
+    state: &AppState,
+    paste: Paste,
+    query: &PasteQuery,
+) -> ApiResult<HttpResponse> {
     if !unlock(&paste, query.password.as_deref()).await? {
         return Err(AppError::NotFound.into());
     }
+
+    let nonce = paste.e2e_encrypted.then(csp::Nonce::new);
 
     let mut response = HttpResponse::Ok();
     response
         .content_type(header::ContentType::html())
         .append_header((header::X_CONTENT_TYPE_OPTIONS, "nosniff"))
-        .append_header((header::CACHE_CONTROL, cache_control(&paste)));
+        .append_header(csp::header(&csp::paste_policy(nonce.as_ref())))
+        .append_header(cache::cache_control(
+            cache::MaxAges::from_config(&state.config),
+            paste.expires_at,
+            paste.password_hash.is_some(),
+        ));
 
-    Ok(response.body(render_html(&paste)))
+    Ok(response.body(render_html(&paste, nonce.as_ref())))
 }
 
 async fn fetch_paste(state: &AppState, key: &str) -> Result<Paste, AppError> {
@@ -51,7 +61,9 @@ async fn fetch_paste(state: &AppState, key: &str) -> Result<Paste, AppError> {
         r#"
         SELECT p.* FROM pastes p
         INNER JOIN users u ON u.id = p.user_id
+        LEFT JOIN domain_settings ds ON ds.user_id = p.user_id
         WHERE p.key = $1
+          AND ds.pastes_path_prefix IS NULL
           AND (p.expires_at IS NULL OR p.expires_at > now())
           AND u.deleted_at IS NULL
         "#,
@@ -98,23 +110,7 @@ async fn unlock(paste: &Paste, password: Option<&str>) -> Result<bool, AppError>
     verify_password_async(password, hash).await
 }
 
-fn cache_control(paste: &Paste) -> String {
-    // browsers use max-age which must be short so mutations propagate quickly
-    // cloudflare uses s-maxage which can be long since we can purge it on mutation
-    const BROWSER_MAX_AGE: i64 = 300;
-    const EDGE_MAX_AGE: i64 = 31_536_000;
-    if paste.password_hash.is_some() {
-        return "no-store".into();
-    }
-    let cap = paste
-        .expires_at
-        .map(|expires| (expires - Utc::now()).num_seconds().clamp(0, EDGE_MAX_AGE))
-        .unwrap_or(EDGE_MAX_AGE);
-    let browser = BROWSER_MAX_AGE.min(cap);
-    format!("public, max-age={browser}, s-maxage={cap}")
-}
-
-fn render_html(paste: &Paste) -> String {
+fn render_html(paste: &Paste, nonce: Option<&csp::Nonce>) -> String {
     let title = paste.title.as_deref().unwrap_or("Paste");
     let syntax = paste.syntax.as_deref().unwrap_or("plain text");
     let created_at = paste.created_at.format("%B %-d, %Y at %H:%M UTC");
@@ -127,22 +123,56 @@ fn render_html(paste: &Paste) -> String {
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { (title) }
                 meta property="og:title" content=(title);
-                meta property="og:site_name" content="iono";
-                meta name="theme-color" content="#7c3aed";
             }
             body {
                 main {
                     header {
                         h1 { (title) }
-                        p { (syntax) " / " (created_at) }
+                        p {
+                            (syntax) " / " (created_at)
+                            @if paste.e2e_encrypted { " / end-to-end encrypted" }
+                        }
                     }
-                    pre { code { (&paste.content) } }
+                    @if paste.e2e_encrypted {
+                        pre id="content" data-ciphertext=(&paste.content) {
+                            code { "Decrypting…" }
+                        }
+                        script nonce=[nonce.map(csp::Nonce::value)] { (PreEscaped(DECRYPT_JS)) }
+                        noscript { p { "Please enable javascript for decryption" } }
+                    } @else {
+                        pre { code { (&paste.content) } }
+                    }
                 }
             }
         }
     }
     .into_string()
 }
+
+const DECRYPT_JS: &str = r#"
+(async () => {
+  const el = document.getElementById('content');
+  const out = el.querySelector('code');
+  const fail = (msg) => { out.textContent = msg; };
+
+  const b64 = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+
+  const keyText = location.hash.slice(1);
+  if (!keyText) return fail('This paste is encrypted');
+
+  try {
+    const raw = b64(keyText);
+    const payload = b64(el.dataset.ciphertext);
+    const iv = payload.slice(0, 12);
+    const data = payload.slice(12);
+    const key = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['decrypt']);
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, data);
+    out.textContent = new TextDecoder().decode(plain);
+  } catch (e) {
+    fail('Could not decrypt this paste');
+  }
+})();
+"#;
 
 #[cfg(test)]
 mod tests {
@@ -160,10 +190,11 @@ mod tests {
             syntax: None,
             password_hash: None,
             expires_at: None,
+            e2e_encrypted: false,
             created_at: Utc::now(),
         };
 
-        let html = render_html(&paste);
+        let html = render_html(&paste, None);
         assert!(!html.contains("<script>alert"));
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
     }

@@ -20,6 +20,7 @@ pub struct FileSummary {
     folder_id: Option<String>,
     is_favourite: bool,
     password_protected: bool,
+    encrypted: bool,
     expires_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
 }
@@ -34,6 +35,7 @@ impl From<File> for FileSummary {
             folder_id: file.folder_id,
             is_favourite: file.is_favourite,
             password_protected: file.password_hash.is_some(),
+            encrypted: file.encrypted,
             expires_at: file.expires_at,
             created_at: file.created_at,
         }

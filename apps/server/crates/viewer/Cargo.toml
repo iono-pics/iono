@@ -20,6 +20,9 @@ serde_json.workspace = true
 chrono.workspace = true
 humansize.workspace = true
 maud.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+secrecy.workspace = true
 
 tracing.workspace = true
 tracing-actix-web.workspace = true

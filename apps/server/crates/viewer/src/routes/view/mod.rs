@@ -4,23 +4,26 @@ pub mod raw_with_prefix;
 pub mod view_with_prefix;
 
 use actix_web::{http::header, HttpRequest, HttpResponse};
-use chrono::Utc;
+use bytes::Bytes;
+use futures_util::stream::{BoxStream, StreamExt};
 use iono_core::{
     auth::password::verify_password_async,
-    content_type,
+    content_type, crypto,
     entities::{EmbedPreset, File},
     AppError,
 };
+use secrecy::ExposeSecret;
 use serde::Deserialize;
 use sqlx::PgPool;
 
-use iono_core::web::{append_password_query, ApiResult};
+use iono_core::web::{append_query, ApiResult};
 
-use crate::{embed, state::AppState};
+use crate::{cache, csp, embed, state::AppState};
 
 #[derive(Deserialize)]
 pub struct ViewQuery {
     password: Option<String>,
+    key: Option<String>,
 }
 
 async fn view_page_inner(
@@ -32,17 +35,27 @@ async fn view_page_inner(
     if !unlock(&file, query.password.as_deref()).await? {
         return Err(AppError::NotFound.into());
     }
+    verify_user_key(&file, query.key.as_deref()).await?;
 
-    let raw_url = append_password_query(raw_url_base, query.password.as_deref());
+    let raw_url = append_query(
+        raw_url_base,
+        &[
+            ("password", query.password.as_deref()),
+            ("key", query.key.as_deref()),
+        ],
+    );
     let active = fetch_active_preset(&state.db, &file.user_id).await?;
     let (preset, uploader) = match active {
         Some(active) => (Some(active.preset), active.username),
         None => (None, String::new()),
     };
-    let html = embed::render_embed_html(&file, &uploader, &raw_url, preset.as_ref());
+    let nonce = csp::Nonce::new();
+    let html = embed::render_embed_html(&file, &uploader, &raw_url, preset.as_ref(), &nonce);
 
     Ok(HttpResponse::Ok()
         .content_type(header::ContentType::html())
+        .append_header((header::X_CONTENT_TYPE_OPTIONS, "nosniff"))
+        .append_header(csp::header(&csp::view_policy(&nonce)))
         .body(html))
 }
 
@@ -56,11 +69,21 @@ async fn raw_file_inner(
         return Err(AppError::NotFound.into());
     }
 
+    let user_key = verify_user_key(&file, query.key.as_deref()).await?;
+
     let range = req
         .headers()
         .get(header::RANGE)
         .and_then(|v| v.to_str().ok());
     let object = state.storage.get(&file.original_name, range).await?;
+
+    let offset = object
+        .content_range
+        .as_deref()
+        .and_then(range_start)
+        .unwrap_or(0);
+    let layers = decryption_layers(state, &file, user_key.as_deref(), offset)?;
+    let stream = decrypting_stream(object.stream, layers);
 
     let disposition = header::ContentDisposition {
         disposition: if content_type::is_inline_safe(&file.content_type) {
@@ -81,8 +104,12 @@ async fn raw_file_inner(
     builder
         .content_type(file.content_type.clone())
         .append_header((header::X_CONTENT_TYPE_OPTIONS, "nosniff"))
+        .append_header(csp::header(csp::raw_policy()))
         .append_header((header::ACCEPT_RANGES, "bytes"))
-        .append_header(cache_control(&file))
+        .append_header(cache_control(
+            cache::MaxAges::from_config(&state.config),
+            &file,
+        ))
         .append_header(disposition);
     if let Some(content_range) = &object.content_range {
         builder.append_header((header::CONTENT_RANGE, content_range.clone()));
@@ -91,30 +118,77 @@ async fn raw_file_inner(
         builder.no_chunking(len);
     }
 
-    Ok(builder.streaming(object.stream))
+    Ok(builder.streaming(stream))
 }
 
-fn cache_control(file: &File) -> header::CacheControl {
-    // browsers use max-age which must be short so mutations propagate quickly
-    // cloudflare uses s-maxage which can be long since we can purge it on mutation
-    const BROWSER_MAX_AGE: u32 = 300;
-    const EDGE_MAX_AGE: u32 = 31_536_000;
-    if file.password_hash.is_some() {
-        return header::CacheControl(vec![header::CacheDirective::NoStore]);
+fn range_start(content_range: &str) -> Option<u64> {
+    content_range
+        .strip_prefix("bytes ")?
+        .split('-')
+        .next()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+async fn verify_user_key(file: &File, provided: Option<&str>) -> Result<Option<String>, AppError> {
+    let Some(hash) = file.user_key_hash.clone() else {
+        return Ok(None);
+    };
+    let Some(provided) = provided.map(str::to_owned) else {
+        return Err(AppError::NotFound);
+    };
+    if !verify_password_async(provided.clone(), hash).await? {
+        return Err(AppError::NotFound);
     }
-    let cap = file
-        .expires_at
-        .map(|expires| {
-            (expires - Utc::now())
-                .num_seconds()
-                .clamp(0, EDGE_MAX_AGE as i64) as u32
+    Ok(Some(provided))
+}
+
+fn decryption_layers(
+    state: &AppState,
+    file: &File,
+    user_key: Option<&str>,
+    offset: u64,
+) -> Result<crypto::Layers, AppError> {
+    let mut layers = Vec::new();
+
+    if let Some(iv) = file.encryption_iv.as_deref() {
+        let key = crypto::parse_key(state.config.file_encryption_key.expose_secret())?;
+        layers.push(crypto::Keystream::at(&key, &iv_array(iv)?, offset)?);
+    }
+
+    if let (Some(key), Some(iv)) = (user_key, file.user_key_iv.as_deref()) {
+        let key = crypto::parse_key(key)?;
+        layers.push(crypto::Keystream::at(&key, &iv_array(iv)?, offset)?);
+    }
+
+    Ok(crypto::Layers::new(layers))
+}
+
+fn iv_array(iv: &[u8]) -> Result<[u8; crypto::IV_LEN], AppError> {
+    iv.try_into()
+        .map_err(|_| AppError::internal("stored encryption iv is malformed"))
+}
+
+fn decrypting_stream(
+    stream: BoxStream<'static, std::io::Result<Bytes>>,
+    mut layers: crypto::Layers,
+) -> BoxStream<'static, std::io::Result<Bytes>> {
+    if layers.is_empty() {
+        return stream;
+    }
+    Box::pin(stream.map(move |chunk| {
+        chunk.map(|bytes| {
+            let mut buf = bytes.to_vec();
+            layers.apply(&mut buf);
+            Bytes::from(buf)
         })
-        .unwrap_or(EDGE_MAX_AGE);
-    header::CacheControl(vec![
-        header::CacheDirective::Public,
-        header::CacheDirective::MaxAge(BROWSER_MAX_AGE.min(cap)),
-        header::CacheDirective::SMaxAge(cap),
-    ])
+    }))
+}
+
+fn cache_control(ages: cache::MaxAges, file: &File) -> header::CacheControl {
+    let secret = file.password_hash.is_some() || file.user_key_hash.is_some();
+    cache::cache_control(ages, file.expires_at, secret)
 }
 
 async fn fetch_file(state: &AppState, display_name: &str) -> Result<File, AppError> {
@@ -122,7 +196,9 @@ async fn fetch_file(state: &AppState, display_name: &str) -> Result<File, AppErr
         r#"
         SELECT f.* FROM files f
         INNER JOIN users u ON u.id = f.user_id
+        LEFT JOIN domain_settings ds ON ds.user_id = f.user_id
         WHERE f.display_name = $1
+          AND ds.files_path_prefix IS NULL
           AND (f.expires_at IS NULL OR f.expires_at > now())
           AND u.deleted_at IS NULL
         "#,

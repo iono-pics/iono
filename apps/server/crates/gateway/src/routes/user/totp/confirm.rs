@@ -44,7 +44,8 @@ pub async fn confirm_totp(
 
     let mut tx = state.db.begin().await.map_err(AppError::from)?;
 
-    let recovery_codes = replace_recovery_codes(&mut tx, &user.0.id).await?;
+    let recovery_codes =
+        replace_recovery_codes(&mut tx, &user.0.id, state.config.totp_recovery_code_count).await?;
 
     sqlx::query("UPDATE users SET totp_enabled = true WHERE id = $1")
         .bind(&user.0.id)

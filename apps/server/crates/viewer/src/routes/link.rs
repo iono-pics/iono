@@ -12,7 +12,9 @@ pub async fn follow_short_link(
         r#"
         SELECT s.* FROM short_links s
         INNER JOIN users u ON u.id = s.user_id
+        LEFT JOIN domain_settings ds ON ds.user_id = s.user_id
         WHERE s.key = $1
+          AND ds.short_links_path_prefix IS NULL
           AND (s.expires_at IS NULL OR s.expires_at > now())
           AND u.deleted_at IS NULL
         "#,

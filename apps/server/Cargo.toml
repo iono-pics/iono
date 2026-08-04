@@ -60,6 +60,8 @@ subtle = "2"
 hex = "0.4"
 rand = "0.10.2"
 argon2 = "0.5"
+aes = "0.8"
+ctr = "0.9"
 jsonwebtoken = "9"
 totp-rs = { version = "5", features = ["otpauth"] }
 webauthn-rs = { version = "0.5", default-features = false, features = [

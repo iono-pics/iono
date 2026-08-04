@@ -68,7 +68,10 @@ async fn main() -> std::io::Result<()> {
         webauthn,
     });
 
+    let governor = routes::rate_limit::auth_governor(&state.config);
+
     HttpServer::new(move || {
+        let governor = governor.clone();
         let cors = iono_core::web::cors([
             Method::GET,
             Method::POST,
@@ -81,7 +84,7 @@ async fn main() -> std::io::Result<()> {
             .wrap(TracingLogger::default())
             .wrap(actix_web::middleware::NormalizePath::trim())
             .app_data(state.clone())
-            .configure(routes::configure)
+            .configure(move |cfg| routes::configure(cfg, &governor))
     })
     .bind((host, port))?
     .run()

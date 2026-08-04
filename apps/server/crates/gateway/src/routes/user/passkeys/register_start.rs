@@ -43,6 +43,7 @@ pub async fn register_start(state: web::Data<AppState>, user: JwtUser) -> ApiRes
         Some(&user.0.id),
         webauthn::PASSKEY_REG_PURPOSE,
         &reg_state,
+        state.config.webauthn_ceremony_ttl_minutes,
     )
     .await?;
 
