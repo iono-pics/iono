@@ -1,6 +1,7 @@
 use aes::Aes256;
 use ctr::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
 use rand::Rng;
+use std::collections::HashMap;
 
 use crate::error::{AppError, AppResult};
 
@@ -29,6 +30,54 @@ pub fn random_nonce() -> String {
     let mut bytes = [0u8; 16];
     rand::rng().fill_bytes(&mut bytes);
     hex::encode(bytes)
+}
+
+#[derive(Debug, Clone)]
+pub struct Keyring {
+    current_version: i16,
+    keys: HashMap<i16, [u8; KEY_LEN]>,
+}
+
+impl Keyring {
+    pub fn new(current_version: i16, current: &str, previous: &str) -> AppResult<Self> {
+        let mut keys = HashMap::new();
+        keys.insert(current_version, parse_key(current)?);
+
+        for entry in previous.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+            let (version, key) = entry.split_once(':').ok_or_else(|| {
+                AppError::internal("previous encryption keys must be version:hexkey pairs")
+            })?;
+            let version: i16 = version.trim().parse().map_err(|_| {
+                AppError::internal("previous encryption key version is not a number")
+            })?;
+            if keys.insert(version, parse_key(key)?).is_some() {
+                return Err(AppError::internal(format!(
+                    "encryption key version {version} is defined twice"
+                )));
+            }
+        }
+
+        Ok(Self {
+            current_version,
+            keys,
+        })
+    }
+
+    pub fn current_version(&self) -> i16 {
+        self.current_version
+    }
+
+    pub fn current(&self) -> &[u8; KEY_LEN] {
+        &self.keys[&self.current_version]
+    }
+
+    pub fn get(&self, version: i16) -> AppResult<&[u8; KEY_LEN]> {
+        self.keys.get(&version).ok_or_else(|| {
+            AppError::internal(format!(
+                "no encryption key configured for version {version}"
+            ))
+        })
+    }
 }
 
 pub fn parse_key(hex_key: &str) -> AppResult<[u8; KEY_LEN]> {
@@ -76,6 +125,27 @@ impl Layers {
 pub fn encrypt_buffer(key: &[u8; KEY_LEN], iv: &[u8; IV_LEN], buf: &mut [u8]) -> AppResult<()> {
     Keystream::at(key, iv, 0)?.apply(buf);
     Ok(())
+}
+
+pub fn wrap_key(
+    kek: &[u8; KEY_LEN],
+    iv: &[u8; IV_LEN],
+    key: &[u8; KEY_LEN],
+) -> AppResult<[u8; KEY_LEN]> {
+    let mut wrapped = *key;
+    encrypt_buffer(kek, iv, &mut wrapped)?;
+    Ok(wrapped)
+}
+
+pub fn unwrap_key(
+    kek: &[u8; KEY_LEN],
+    iv: &[u8; IV_LEN],
+    wrapped: &[u8],
+) -> AppResult<[u8; KEY_LEN]> {
+    let wrapped: [u8; KEY_LEN] = wrapped
+        .try_into()
+        .map_err(|_| AppError::internal("stored data key is the wrong length"))?;
+    wrap_key(kek, iv, &wrapped)
 }
 
 #[cfg(test)]
@@ -170,6 +240,86 @@ mod tests {
         encrypt_buffer(&random_key(), &iv, &mut buf).unwrap();
 
         assert_ne!(buf, plain);
+    }
+
+    #[test]
+    fn a_wrapped_data_key_round_trips() {
+        let (kek, iv, dek) = (random_key(), random_iv(), random_key());
+
+        let wrapped = wrap_key(&kek, &iv, &dek).unwrap();
+        assert_ne!(wrapped, dek, "the key must not be stored in the clear");
+        assert_eq!(unwrap_key(&kek, &iv, &wrapped).unwrap(), dek);
+    }
+
+    #[test]
+    fn rewrapping_under_a_new_kek_recovers_the_same_data_key() {
+        let (old_kek, new_kek, dek) = (random_key(), random_key(), random_key());
+        let old_iv = random_iv();
+
+        let wrapped = wrap_key(&old_kek, &old_iv, &dek).unwrap();
+
+        let recovered = unwrap_key(&old_kek, &old_iv, &wrapped).unwrap();
+        let new_iv = random_iv();
+        let rewrapped = wrap_key(&new_kek, &new_iv, &recovered).unwrap();
+
+        assert_eq!(unwrap_key(&new_kek, &new_iv, &rewrapped).unwrap(), dek);
+        let mut object = b"object bytes".to_vec();
+        let object_iv = random_iv();
+        encrypt_buffer(&dek, &object_iv, &mut object).unwrap();
+        encrypt_buffer(
+            &unwrap_key(&new_kek, &new_iv, &rewrapped).unwrap(),
+            &object_iv,
+            &mut object,
+        )
+        .unwrap();
+        assert_eq!(object, b"object bytes");
+    }
+
+    #[test]
+    fn unwrapping_with_the_wrong_kek_does_not_yield_the_data_key() {
+        let (kek, iv, dek) = (random_key(), random_iv(), random_key());
+        let wrapped = wrap_key(&kek, &iv, &dek).unwrap();
+
+        assert_ne!(unwrap_key(&random_key(), &iv, &wrapped).unwrap(), dek);
+    }
+
+    #[test]
+    fn a_truncated_stored_key_is_rejected() {
+        let (kek, iv) = (random_key(), random_iv());
+        assert!(unwrap_key(&kek, &iv, &[0u8; 16]).is_err());
+    }
+
+    #[test]
+    fn a_keyring_serves_the_current_key_and_older_ones() {
+        let (k1, k2) = (random_key(), random_key());
+        let ring = Keyring::new(2, &encode_key(&k2), &format!("1:{}", encode_key(&k1))).unwrap();
+
+        assert_eq!(ring.current_version(), 2);
+        assert_eq!(ring.current(), &k2);
+        assert_eq!(ring.get(2).unwrap(), &k2);
+        assert_eq!(ring.get(1).unwrap(), &k1);
+    }
+
+    #[test]
+    fn a_keyring_needs_no_previous_keys() {
+        let key = random_key();
+        let ring = Keyring::new(1, &encode_key(&key), "").unwrap();
+        assert_eq!(ring.current(), &key);
+    }
+
+    #[test]
+    fn an_unknown_version_is_an_error_not_a_wrong_decrypt() {
+        let ring = Keyring::new(1, &encode_key(&random_key()), "").unwrap();
+        assert!(ring.get(7).is_err());
+    }
+
+    #[test]
+    fn a_keyring_rejects_malformed_or_duplicated_entries() {
+        let key = encode_key(&random_key());
+        assert!(Keyring::new(1, &key, "nocolon").is_err());
+        assert!(Keyring::new(1, &key, "x:meow").is_err());
+        assert!(Keyring::new(1, &key, &format!("2:{}", "zz".repeat(32))).is_err());
+        assert!(Keyring::new(1, &key, &format!("1:{key}")).is_err());
     }
 
     #[test]

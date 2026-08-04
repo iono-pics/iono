@@ -16,5 +16,8 @@ pub struct File {
     pub encryption_iv: Option<Vec<u8>>,
     pub user_key_iv: Option<Vec<u8>>,
     pub user_key_hash: Option<String>,
+    pub encryption_key_version: Option<i16>,
+    pub wrapped_dek: Option<Vec<u8>>,
+    pub dek_iv: Option<Vec<u8>>,
     pub created_at: DateTime<Utc>,
 }

@@ -12,7 +12,6 @@ use iono_core::{
     entities::{EmbedPreset, File},
     AppError,
 };
-use secrecy::ExposeSecret;
 use serde::Deserialize;
 use sqlx::PgPool;
 
@@ -153,7 +152,15 @@ fn decryption_layers(
     let mut layers = Vec::new();
 
     if let Some(iv) = file.encryption_iv.as_deref() {
-        let key = crypto::parse_key(state.config.file_encryption_key.expose_secret())?;
+        let kek = state
+            .keyring
+            .get(file.encryption_key_version.unwrap_or(1))?;
+
+        let key = match (file.wrapped_dek.as_deref(), file.dek_iv.as_deref()) {
+            (Some(wrapped), Some(dek_iv)) => crypto::unwrap_key(kek, &iv_array(dek_iv)?, wrapped)?,
+            _ => *kek,
+        };
+
         layers.push(crypto::Keystream::at(&key, &iv_array(iv)?, offset)?);
     }
 

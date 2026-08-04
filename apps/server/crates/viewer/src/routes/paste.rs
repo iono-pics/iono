@@ -50,7 +50,7 @@ async fn render_paste(
         .append_header(cache::cache_control(
             cache::MaxAges::from_config(&state.config),
             paste.expires_at,
-            paste.password_hash.is_some(),
+            paste.password_hash.is_some() || paste.e2e_encrypted,
         ));
 
     Ok(response.body(render_html(&paste, nonce.as_ref())))

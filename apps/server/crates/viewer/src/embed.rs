@@ -158,6 +158,9 @@ mod tests {
             encryption_iv: None,
             user_key_iv: None,
             user_key_hash: None,
+            encryption_key_version: None,
+            wrapped_dek: None,
+            dek_iv: None,
             created_at: Utc::now(),
         }
     }

@@ -7,6 +7,7 @@ use crate::db;
 use crate::storage::{self, Storage};
 
 pub struct CoreState {
+    pub keyring: crate::crypto::Keyring,
     pub storage: Arc<dyn Storage>,
     pub db: PgPool,
     pub config: Config,
@@ -21,6 +22,7 @@ impl CoreState {
             .await
             .expect("failed to connect to database");
         Self {
+            keyring: config.keyring(),
             storage,
             db,
             config: config.clone(),

@@ -1,6 +1,6 @@
 use std::env;
 
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -30,6 +30,8 @@ pub struct Config {
     pub ingest_rate_limit_burst: u32,
 
     pub file_encryption_key: SecretString,
+    pub file_encryption_key_version: i16,
+    pub file_encryption_previous_keys: SecretString,
 
     pub recovery_window_days: i64,
     pub totp_recovery_code_count: usize,
@@ -41,6 +43,7 @@ pub struct Config {
 
     pub sweep_batch_size: i64,
     pub encrypt_backfill_batch_size: i64,
+    pub encrypt_backfill_max_object_bytes: i64,
 
     pub browser_cache_max_age_seconds: u32,
     pub edge_cache_max_age_seconds: u32,
@@ -65,6 +68,15 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn keyring(&self) -> crate::crypto::Keyring {
+        crate::crypto::Keyring::new(
+            self.file_encryption_key_version,
+            self.file_encryption_key.expose_secret(),
+            self.file_encryption_previous_keys.expose_secret(),
+        )
+        .expect("file encryption keys malformed")
+    }
+
     pub fn from_env() -> Self {
         Self {
             host: env_or("HOST", "0.0.0.0"),
@@ -130,6 +142,10 @@ impl Config {
                 crate::crypto::parse_key(&key).expect("FILE_ENCRYPTION_KEY malformed");
                 key
             }),
+            file_encryption_key_version: env_or("FILE_ENCRYPTION_KEY_VERSION", "1")
+                .parse()
+                .expect("FILE_ENCRYPTION_KEY_VERSION malformed"),
+            file_encryption_previous_keys: env_secret_or("FILE_ENCRYPTION_PREVIOUS_KEYS", ""),
 
             recovery_window_days: env_or("RECOVERY_WINDOW_DAYS", "30")
                 .parse()
@@ -155,6 +171,11 @@ impl Config {
             encrypt_backfill_batch_size: env_or("ENCRYPT_BACKFILL_BATCH_SIZE", "100")
                 .parse()
                 .expect("ENCRYPT_BACKFILL_BATCH_SIZE malformed"),
+            encrypt_backfill_max_object_bytes: env_or("ENCRYPT_BACKFILL_MAX_OBJECT_MB", "512")
+                .parse::<i64>()
+                .expect("ENCRYPT_BACKFILL_MAX_OBJECT_MB malformed")
+                * 1024
+                * 1024,
 
             browser_cache_max_age_seconds: env_or("BROWSER_CACHE_MAX_AGE_SECONDS", "300")
                 .parse()

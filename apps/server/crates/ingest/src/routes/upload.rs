@@ -7,7 +7,6 @@ use iono_core::{
     entities::{File, UserSettings},
     validators, AppError,
 };
-use secrecy::ExposeSecret;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -97,12 +96,15 @@ pub async fn upload_file(
         (None, None, None)
     };
 
-    let global_key = crypto::parse_key(state.config.file_encryption_key.expose_secret())?;
+    let dek = crypto::random_key();
     let encryption_iv = crypto::random_iv();
+    crypto::encrypt_buffer(&dek, &encryption_iv, &mut data)?;
 
-    crypto::encrypt_buffer(&global_key, &encryption_iv, &mut data)?;
+    let dek_iv = crypto::random_iv();
+    let wrapped_dek = crypto::wrap_key(state.keyring.current(), &dek_iv, &dek)?;
 
     let encryption_iv = encryption_iv.to_vec();
+    let encryption_key_version = state.keyring.current_version();
 
     let id = Uuid::new_v4().to_string();
     let extension = content_type::extension_for(&mime_type);
@@ -133,8 +135,8 @@ pub async fn upload_file(
 
         sqlx::query_as::<_, File>(
             r#"
-            INSERT INTO files (id, user_id, display_name, original_name, content_type, size_bytes, password_hash, expires_at, encrypted, encryption_iv, user_key_iv, user_key_hash)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            INSERT INTO files (id, user_id, display_name, original_name, content_type, size_bytes, password_hash, expires_at, encrypted, encryption_iv, user_key_iv, user_key_hash, encryption_key_version, wrapped_dek, dek_iv)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             RETURNING *
             "#,
         )
@@ -150,6 +152,9 @@ pub async fn upload_file(
         .bind(&encryption_iv)
         .bind(&user_key_iv)
         .bind(&user_key_hash)
+        .bind(encryption_key_version)
+        .bind(wrapped_dek.to_vec())
+        .bind(dek_iv.to_vec())
         .fetch_one(&db)
         .await
         .map_err(AppError::from)
