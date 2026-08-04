@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-#[derive(Debug, Clone, PartialEq, Eq, sqlx::Type, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::Type, Serialize, Deserialize, ToSchema)]
 #[sqlx(type_name = "text", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum DisplayNameStyle {

@@ -3,7 +3,10 @@ pub mod rate_limit;
 pub mod user;
 
 use actix_web::{get, web};
-use iono_core::{entities::DisplayNameStyle, openapi::BearerSecurity};
+use iono_core::{
+    entities::{DisplayNameStyle, SubscriptionStatus},
+    openapi::BearerSecurity,
+};
 use utoipa::OpenApi;
 
 #[derive(OpenApi)]
@@ -76,6 +79,11 @@ use utoipa::OpenApi;
         auth::restore::RestoreRequest,
         auth::discord::login::DiscordLoginRequest,
         auth::discord::DiscordAuthResponse,
+        user::me::MeResponse,
+        user::me::PlanSummary,
+        user::me::StorageSummary,
+        user::me::SubscriptionSummary,
+        user::me::SettingsSummary,
         user::storage::StorageUsage,
         user::export::ExportType,
         user::settings::update::UpdateSettingsRequest,
@@ -89,6 +97,7 @@ use utoipa::OpenApi;
         user::embeds::presets::update::UpdateEmbedPresetRequest,
         user::embeds::variables::EmbedVariableSummary,
         DisplayNameStyle,
+        SubscriptionStatus,
         user::change_password::ChangePasswordRequest,
         user::redeem::RedeemRequest,
         user::totp::ReauthRequest,

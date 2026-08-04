@@ -23,20 +23,21 @@ pub async fn plan_for_user(pool: &PgPool, user_id: &str) -> Result<Plan, AppErro
 }
 
 pub async fn storage_used_bytes(pool: &PgPool, user_id: &str) -> Result<i64, AppError> {
-    let used: Option<i64> = sqlx::query_scalar(
+    let used: i64 = sqlx::query_scalar(
         r#"
-        SELECT
+        SELECT (
             (SELECT COALESCE(SUM(size_bytes), 0) FROM files
                 WHERE user_id = $1 AND (expires_at IS NULL OR expires_at > now()))
             + (SELECT COALESCE(SUM(octet_length(content)), 0) FROM pastes
                 WHERE user_id = $1 AND (expires_at IS NULL OR expires_at > now()))
+        )::BIGINT
         "#,
     )
     .bind(user_id)
     .fetch_one(pool)
     .await?;
 
-    Ok(used.unwrap_or(0)) // TODO: handle this better
+    Ok(used)
 }
 
 pub async fn check_storage_quota(

@@ -1,7 +1,10 @@
 use chrono::{DateTime, Utc};
+use serde::Serialize;
+use utoipa::ToSchema;
 
-#[derive(Debug, Clone, PartialEq, Eq, sqlx::Type)]
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::Type, Serialize, ToSchema)]
 #[sqlx(type_name = "text", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum SubscriptionStatus {
     Trialing,
     Active,
