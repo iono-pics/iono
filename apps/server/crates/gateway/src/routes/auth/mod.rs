@@ -84,6 +84,17 @@ pub(crate) fn access_token_payload(
     })
 }
 
+pub(crate) async fn registered_passkey_count(
+    db: impl sqlx::PgExecutor<'_>,
+    user_id: &str,
+) -> Result<i64, AppError> {
+    sqlx::query_scalar("SELECT COUNT(*) FROM passkeys WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_one(db)
+        .await
+        .map_err(AppError::from)
+}
+
 pub(crate) async fn mfa_challenge(
     db: &PgPool,
     jwt_secret: &str,
@@ -93,11 +104,7 @@ pub(crate) async fn mfa_challenge(
         return Ok(None);
     }
 
-    let passkey_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM passkeys WHERE user_id = $1")
-        .bind(&user.id)
-        .fetch_one(db)
-        .await
-        .map_err(AppError::from)?;
+    let passkey_count = registered_passkey_count(db, &user.id).await?;
 
     let mut methods = Vec::new();
     if passkey_count > 0 {
@@ -105,6 +112,12 @@ pub(crate) async fn mfa_challenge(
     }
     if user.totp_enabled {
         methods.push("totp");
+    }
+
+    if methods.is_empty() {
+        return Err(AppError::Conflict(
+            "this account requires a passkey but has none registered".into(),
+        ));
     }
 
     Ok(Some(MfaChallenge {
@@ -207,14 +220,26 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../../migrations")]
-    async fn passkey_required_but_none_registered(db: PgPool) {
+    async fn passkey_required_but_none_registered_is_rejected(db: PgPool) {
         let user = insert_user(&db, false, true).await;
+
+        let result = mfa_challenge(&db, SECRET, &user).await;
+
+        assert!(
+            matches!(result, Err(AppError::Conflict(_))),
+            "must not fall through to an access token or an empty challenge"
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn totp_still_answers_when_the_required_passkey_is_gone(db: PgPool) {
+        let user = insert_user(&db, true, true).await;
 
         let challenge = mfa_challenge(&db, SECRET, &user)
             .await
             .unwrap()
-            .expect("must not fall through to an access token");
+            .expect("totp account must still be challenged");
 
-        assert!(challenge.methods().is_empty());
+        assert_eq!(challenge.methods(), ["totp"]);
     }
 }

@@ -8,6 +8,7 @@ pub mod db;
 pub mod embed_vars;
 pub mod entities;
 pub mod error;
+pub mod image_compress;
 pub mod oauth;
 pub mod openapi;
 pub mod quota;

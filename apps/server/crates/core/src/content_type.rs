@@ -2,7 +2,7 @@ use std::io::Cursor;
 
 pub const FALLBACK_MIME_TYPE: &str = "application/octet-stream";
 
-fn decode_limits() -> image::Limits {
+pub(crate) fn decode_limits() -> image::Limits {
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(16_384);
     limits.max_image_height = Some(16_384);

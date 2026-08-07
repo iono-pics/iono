@@ -10,7 +10,7 @@ use utoipa::ToSchema;
 use crate::{
     auth::JwtUser,
     routes::{
-        auth::signed_in_payload,
+        auth::{registered_passkey_count, signed_in_payload},
         user::totp::{require_reauth, ReauthRequest},
     },
     state::AppState,
@@ -44,18 +44,8 @@ pub async fn require_passkey(
     let reauth = ReauthRequest::new(body.password.clone(), body.totp_code.clone());
     require_reauth(&user.0, &reauth).await?;
 
-    if body.required {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM passkeys WHERE user_id = $1")
-            .bind(&user.0.id)
-            .fetch_one(&state.db)
-            .await
-            .map_err(AppError::from)?;
-
-        if count == 0 {
-            return Err(
-                AppError::BadRequest("register a passkey before requiring one".into()).into(),
-            );
-        }
+    if body.required && registered_passkey_count(&state.db, &user.0.id).await? == 0 {
+        return Err(AppError::BadRequest("register a passkey before requiring one".into()).into());
     }
 
     let new_token_version = user.0.token_version + 1;

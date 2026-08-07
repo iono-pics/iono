@@ -10,7 +10,10 @@ use utoipa::ToSchema;
 
 use iono_core::web::ApiResult;
 
-use crate::{routes::auth::signed_in_payload, state::AppState};
+use crate::{
+    routes::auth::{registered_passkey_count, signed_in_payload},
+    state::AppState,
+};
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct VerifyLoginTotpRequest {
@@ -44,7 +47,7 @@ pub async fn verify_login_totp(
         .map_err(AppError::from)?
         .ok_or(AppError::Unauthorized)?;
 
-    if user.passkey_required {
+    if user.passkey_required && registered_passkey_count(&state.db, &user.id).await? > 0 {
         return Err(AppError::BadRequest("a passkey is required for this account".into()).into());
     }
 

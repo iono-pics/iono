@@ -28,7 +28,8 @@ pub struct LoginRequest {
     request_body = LoginRequest,
     responses(
         (status = 200, description = "returns access token and refresh token, or {mfa_required: true, mfa_token} if mfa is enabled"),
-        (status = 401, description = "invalid credentials")
+        (status = 401, description = "invalid credentials"),
+        (status = 409, description = "the account requires a passkey but has none registered")
     )
 )]
 #[post("/login")]

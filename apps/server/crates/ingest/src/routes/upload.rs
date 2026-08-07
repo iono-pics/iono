@@ -7,7 +7,7 @@ use iono_core::{
     auth::{password::hash_password_async, token},
     content_type, crypto,
     entities::{File, Plan, UserSettings},
-    quota, validators, AppError,
+    image_compress, quota, validators, AppError,
 };
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -85,8 +85,16 @@ pub async fn upload_file(
                 plain_password = Some(text).filter(|p| !p.is_empty());
             }
             Some("file") if uploaded.is_none() => {
-                uploaded =
-                    Some(store_field(&state, field, &budget, settings.encrypt_uploads).await?);
+                uploaded = Some(
+                    store_field(
+                        &state,
+                        field,
+                        &budget,
+                        settings.encrypt_uploads,
+                        settings.lossless_images,
+                    )
+                    .await?,
+                );
             }
             _ => drain_field(field).await?,
         }
@@ -260,6 +268,7 @@ async fn store_field(
     field: Field,
     budget: &Budget,
     encrypt_for_user: bool,
+    lossless_images: bool,
 ) -> Result<Uploaded, AppError> {
     let mut prefix = Vec::with_capacity(SNIFF_BYTES);
     let mut field = Some(field);
@@ -279,6 +288,10 @@ async fn store_field(
     } else {
         content_type::detect(&prefix)
     };
+
+    if lossless_images && field.is_none() {
+        prefix = recompress(prefix, &mime_type).await?;
+    }
 
     let extension = content_type::extension_for(&mime_type);
     let s3_key = format!("{}.{extension}", Uuid::new_v4());
@@ -372,6 +385,16 @@ async fn store_field(
         dek,
         user_key,
     })
+}
+
+async fn recompress(bytes: Vec<u8>, mime_type: &str) -> Result<Vec<u8>, AppError> {
+    let mime_type = mime_type.to_owned();
+
+    tokio::task::spawn_blocking(move || {
+        image_compress::recompress(&bytes, &mime_type).unwrap_or(bytes)
+    })
+    .await
+    .map_err(|e| AppError::internal_from("image recompression panicked", e))
 }
 
 async fn fill(buf: &mut Vec<u8>, field: &mut Option<Field>, target: usize) -> Result<(), AppError> {
@@ -470,6 +493,15 @@ mod tests {
 
         async fn set_encrypt_uploads(&self, on: bool) {
             sqlx::query("UPDATE user_settings SET encrypt_uploads = $1 WHERE user_id = $2")
+                .bind(on)
+                .bind(&self.user_id)
+                .execute(&self.state.db)
+                .await
+                .unwrap();
+        }
+
+        async fn set_lossless_images(&self, on: bool) {
+            sqlx::query("UPDATE user_settings SET lossless_images = $1 WHERE user_id = $2")
                 .bind(on)
                 .bind(&self.user_id)
                 .execute(&self.state.db)
@@ -596,6 +628,23 @@ mod tests {
             )
             .unwrap();
         bytes
+    }
+
+    fn loose_png(side: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(side, side, image::Rgb([17, 99, 240]));
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_with_encoder(image::codecs::png::PngEncoder::new_with_quality(
+                &mut bytes,
+                image::codecs::png::CompressionType::Fast,
+                image::codecs::png::FilterType::NoFilter,
+            ))
+            .unwrap();
+        bytes
+    }
+
+    fn pixels(bytes: &[u8]) -> image::RgbaImage {
+        image::load_from_memory(bytes).unwrap().to_rgba8()
     }
 
     fn multipart_body(file: &[u8], password: Option<&str>) -> Vec<u8> {
@@ -746,6 +795,84 @@ mod tests {
         .unwrap();
         assert!(hash.0.is_some(), "the password was not recorded");
         assert_eq!(fixture.fetch_and_decrypt(None).await, file);
+
+        fixture.cleanup().await;
+    }
+
+    #[actix_web::test]
+    #[ignore = "needs postgres and a live s3 endpoint"]
+    async fn lossless_shrinks_the_object_without_touching_a_pixel() {
+        let fixture = Fixture::new("pro").await;
+        fixture.set_encrypt_uploads(false).await;
+        fixture.set_lossless_images(true).await;
+
+        let file = loose_png(256);
+        let (status, json) = fixture.upload(multipart_body(&file, None)).await;
+        assert_eq!(status, StatusCode::CREATED, "response was {json}");
+
+        let stored = fixture.fetch_and_decrypt(None).await;
+        assert!(
+            stored.len() < file.len(),
+            "{} bytes stored for a {} byte upload, it was not recompressed",
+            stored.len(),
+            file.len()
+        );
+        assert_eq!(
+            pixels(&stored),
+            pixels(&file),
+            "a lossless re-encode changed the image"
+        );
+
+        let size = sqlx::query_as::<_, (i64,)>("SELECT size_bytes FROM files WHERE user_id = $1")
+            .bind(&fixture.user_id)
+            .fetch_one(&fixture.state.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            size.0 as usize,
+            stored.len(),
+            "the recorded size does not match the object, so quota is wrong"
+        );
+
+        fixture.cleanup().await;
+    }
+
+    #[actix_web::test]
+    #[ignore = "needs postgres and a live s3 endpoint"]
+    async fn the_same_image_is_untouched_with_lossless_off() {
+        let fixture = Fixture::new("pro").await;
+        fixture.set_encrypt_uploads(false).await;
+        fixture.set_lossless_images(false).await;
+
+        let file = loose_png(256);
+        let (status, json) = fixture.upload(multipart_body(&file, None)).await;
+        assert_eq!(status, StatusCode::CREATED, "response was {json}");
+
+        assert_eq!(
+            fixture.fetch_and_decrypt(None).await,
+            file,
+            "the upload was re-encoded despite lossless_images being off"
+        );
+
+        fixture.cleanup().await;
+    }
+
+    #[actix_web::test]
+    #[ignore = "needs postgres and a live s3 endpoint"]
+    async fn lossless_leaves_a_non_image_alone() {
+        let fixture = Fixture::new("pro").await;
+        fixture.set_encrypt_uploads(false).await;
+        fixture.set_lossless_images(true).await;
+
+        let file = pattern(BODY);
+        let (status, json) = fixture.upload(multipart_body(&file, None)).await;
+        assert_eq!(status, StatusCode::CREATED, "response was {json}");
+
+        assert_eq!(
+            fixture.fetch_and_decrypt(None).await,
+            file,
+            "a non-image body was altered"
+        );
 
         fixture.cleanup().await;
     }

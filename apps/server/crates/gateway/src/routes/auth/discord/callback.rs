@@ -36,6 +36,7 @@ enum Outcome {
         (status = 302, description = "redirect back to the app, result is passed as a url fragment"),
         (status = 400, description = "invalid callback"),
         (status = 401, description = "authorization failed"),
+        (status = 409, description = "the account requires a passkey but has none registered"),
     )
 )]
 #[get("/discord/callback")]
