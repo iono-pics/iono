@@ -4,7 +4,7 @@ pub mod start;
 
 use chrono::{DateTime, Duration, Utc};
 use iono_core::{
-    auth::{jwt, token},
+    auth::token,
     entities::User,
     oauth::{fetch_discord_user, DiscordUser, OAuthClient, OAuthError, Tokens},
     AppError,
@@ -25,6 +25,9 @@ const PROVIDER: &str = "discord";
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DiscordAuthResponse {
     pub access_token: String,
+    pub refresh_token: String,
+    pub token_type: String,
+    pub expires_in: i64,
     pub is_new_user: bool,
 }
 
@@ -78,9 +81,12 @@ pub(crate) async fn consume_flow_and_fetch(
     Ok((tokens, discord_user, link_user_id))
 }
 
+/// The caller mints the tokens, so both discord entry points go through the
+/// same `signed_in_payload` as every other sign-in route.
 pub(crate) enum LoginOutcome {
     SignedIn {
-        access_token: String,
+        user_id: String,
+        token_version: i32,
         is_new_user: bool,
     },
     MfaRequired(MfaChallenge),
@@ -89,7 +95,6 @@ pub(crate) enum LoginOutcome {
 pub(crate) async fn login_or_signup(
     db: &PgPool,
     jwt_secret: &str,
-    access_ttl_minutes: i64,
     tokens: &Tokens,
     discord_user: &DiscordUser,
 ) -> Result<LoginOutcome, AppError> {
@@ -138,10 +143,9 @@ pub(crate) async fn login_or_signup(
             return Ok(LoginOutcome::MfaRequired(challenge));
         }
 
-        let access_token =
-            jwt::issue_access_token(&user.id, user.token_version, jwt_secret, access_ttl_minutes)?;
         return Ok(LoginOutcome::SignedIn {
-            access_token,
+            user_id: user.id,
+            token_version: user.token_version,
             is_new_user: false,
         });
     }
@@ -157,10 +161,9 @@ pub(crate) async fn login_or_signup(
     )
     .await?;
 
-    let access_token =
-        jwt::issue_access_token(&user.id, user.token_version, jwt_secret, access_ttl_minutes)?;
     Ok(LoginOutcome::SignedIn {
-        access_token,
+        user_id: user.id,
+        token_version: user.token_version,
         is_new_user: true,
     })
 }
@@ -370,7 +373,6 @@ mod tests {
     use super::*;
 
     const SECRET: &str = "test-secret";
-    const TTL: i64 = 15;
 
     fn tokens() -> Tokens {
         Tokens {
@@ -419,7 +421,7 @@ mod tests {
     async fn linked_account_with_totp_is_challenged(db: PgPool) {
         seed_linked_user(&db, true).await;
 
-        let outcome = login_or_signup(&db, SECRET, TTL, &tokens(), &discord_user())
+        let outcome = login_or_signup(&db, SECRET, &tokens(), &discord_user())
             .await
             .unwrap();
 
@@ -433,7 +435,7 @@ mod tests {
     async fn linked_account_without_mfa_signs_in(db: PgPool) {
         seed_linked_user(&db, false).await;
 
-        let outcome = login_or_signup(&db, SECRET, TTL, &tokens(), &discord_user())
+        let outcome = login_or_signup(&db, SECRET, &tokens(), &discord_user())
             .await
             .unwrap();
 
@@ -445,7 +447,7 @@ mod tests {
 
     #[sqlx::test(migrations = "../../migrations")]
     async fn unknown_discord_account_creates_a_user(db: PgPool) {
-        let outcome = login_or_signup(&db, SECRET, TTL, &tokens(), &discord_user())
+        let outcome = login_or_signup(&db, SECRET, &tokens(), &discord_user())
             .await
             .unwrap();
 
@@ -463,7 +465,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = login_or_signup(&db, SECRET, TTL, &tokens(), &discord_user()).await;
+        let result = login_or_signup(&db, SECRET, &tokens(), &discord_user()).await;
 
         assert!(matches!(result, Err(AppError::Unauthorized)));
     }

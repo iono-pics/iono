@@ -1,11 +1,15 @@
-use actix_web::{post, web, HttpResponse};
-use iono_core::{auth::jwt, entities::User, web::ApiResult, AppError};
+use actix_web::{post, web, HttpRequest, HttpResponse};
+use iono_core::{
+    auth::{jwt, refresh, refresh::SessionContext},
+    entities::User,
+    web::ApiResult,
+    AppError,
+};
 use secrecy::ExposeSecret;
 use serde::Deserialize;
-use serde_json::json;
 use utoipa::ToSchema;
 
-use crate::state::AppState;
+use crate::{routes::auth::signed_in_payload, state::AppState};
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RestoreRequest {
@@ -24,6 +28,7 @@ pub struct RestoreRequest {
 )]
 #[post("/restore")]
 pub async fn restore(
+    req: HttpRequest,
     state: web::Data<AppState>,
     body: web::Json<RestoreRequest>,
 ) -> ApiResult<HttpResponse> {
@@ -63,12 +68,15 @@ pub async fn restore(
     .await
     .map_err(AppError::from)?;
 
-    let access_token = jwt::issue_access_token(
+    refresh::revoke_all_for_user(&state.db, &user.id).await?;
+
+    let payload = signed_in_payload(
+        &state,
         &user.id,
         new_token_version,
-        state.config.jwt_secret.expose_secret(),
-        state.config.jwt_access_ttl_minutes,
-    )?;
+        &SessionContext::from_request(&req),
+    )
+    .await?;
 
-    Ok(HttpResponse::Ok().json(json!({ "access_token": access_token })))
+    Ok(HttpResponse::Ok().json(payload))
 }

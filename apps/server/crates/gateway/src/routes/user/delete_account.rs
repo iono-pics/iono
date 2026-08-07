@@ -65,6 +65,8 @@ pub async fn delete_account(
     .await
     .map_err(MapDbError::new().build())?;
 
+    iono_core::auth::refresh::revoke_all_for_user(&state.db, user_id).await?;
+
     let recoverable_until = deleted_at + chrono::Duration::days(state.config.recovery_window_days);
 
     Ok(HttpResponse::Ok().json(json!({

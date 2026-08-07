@@ -1,13 +1,19 @@
 use actix_web::{http::header, post, web, HttpRequest, HttpResponse};
-use iono_core::{auth::jwt, web::ApiResult};
+use iono_core::{
+    auth::{jwt, refresh::SessionContext},
+    web::ApiResult,
+};
 use secrecy::ExposeSecret;
 use serde::Deserialize;
-use serde_json::json;
 use utoipa::ToSchema;
 
 use crate::{
-    routes::auth::discord::{
-        consume_flow_and_fetch, link_to_user, login_or_signup, DiscordAuthResponse, LoginOutcome,
+    routes::auth::{
+        discord::{
+            consume_flow_and_fetch, link_to_user, login_or_signup, DiscordAuthResponse,
+            LoginOutcome,
+        },
+        signed_in_payload,
     },
     state::AppState,
 };
@@ -61,7 +67,6 @@ pub async fn discord_login(
     let outcome = login_or_signup(
         &state.db,
         state.config.jwt_secret.expose_secret(),
-        state.config.jwt_access_ttl_minutes,
         &tokens,
         &discord_user,
     )
@@ -70,13 +75,19 @@ pub async fn discord_login(
     match outcome {
         LoginOutcome::MfaRequired(challenge) => Ok(HttpResponse::Ok().json(challenge.json())),
         LoginOutcome::SignedIn {
-            access_token,
+            user_id,
+            token_version,
             is_new_user,
         } => {
-            let payload = json!({
-                "access_token": access_token,
-                "is_new_user": is_new_user,
-            });
+            let mut payload = signed_in_payload(
+                &state,
+                &user_id,
+                token_version,
+                &SessionContext::from_request(&req),
+            )
+            .await?;
+            payload["is_new_user"] = is_new_user.into();
+
             if is_new_user {
                 Ok(HttpResponse::Created().json(payload))
             } else {

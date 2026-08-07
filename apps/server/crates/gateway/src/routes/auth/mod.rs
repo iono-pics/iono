@@ -1,7 +1,9 @@
 pub mod discord;
 pub mod login;
+pub mod logout;
 pub mod passkey_login_finish;
 pub mod passkey_login_start;
+pub mod refresh;
 pub mod restore;
 pub mod signup;
 pub mod verify_passkey_finish;
@@ -11,11 +13,17 @@ pub mod verify_totp;
 use actix_governor::Governor;
 use actix_web::dev::HttpServiceFactory;
 use actix_web::web;
-use iono_core::{auth::jwt, entities::User, AppError};
+use iono_core::{
+    auth::{jwt, refresh::SessionContext},
+    entities::User,
+    AppError,
+};
+use secrecy::ExposeSecret;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 
 use crate::routes::rate_limit::AuthGovernor;
+use crate::state::AppState;
 
 pub(crate) struct MfaChallenge {
     mfa_token: String,
@@ -38,6 +46,42 @@ impl MfaChallenge {
     pub(crate) fn methods(&self) -> &[&'static str] {
         &self.methods
     }
+}
+
+pub(crate) async fn signed_in_payload(
+    state: &AppState,
+    user_id: &str,
+    token_version: i32,
+    ctx: &SessionContext,
+) -> Result<Value, AppError> {
+    let access_token = jwt::issue_access_token(
+        user_id,
+        token_version,
+        state.config.jwt_secret.expose_secret(),
+        state.config.jwt_access_ttl_minutes,
+    )?;
+    let refresh_token = iono_core::auth::refresh::issue(
+        &state.db,
+        user_id,
+        state.config.refresh_token_ttl_days,
+        ctx,
+    )
+    .await?;
+
+    Ok(access_token_payload(access_token, refresh_token, state))
+}
+
+pub(crate) fn access_token_payload(
+    access_token: String,
+    refresh_token: String,
+    state: &AppState,
+) -> Value {
+    json!({
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "Bearer",
+        "expires_in": state.config.jwt_access_ttl_minutes * 60,
+    })
 }
 
 pub(crate) async fn mfa_challenge(
@@ -74,6 +118,8 @@ pub fn scope(governor: &AuthGovernor) -> impl HttpServiceFactory {
         .wrap(Governor::new(governor))
         .service(signup::signup)
         .service(login::login)
+        .service(refresh::refresh)
+        .service(logout::logout)
         .service(verify_totp::verify_login_totp)
         .service(verify_passkey_start::verify_passkey_start)
         .service(verify_passkey_finish::verify_passkey_finish)

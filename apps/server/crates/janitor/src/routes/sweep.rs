@@ -127,6 +127,13 @@ async fn run_sweep(state: &AppState) -> Result<(u64, u64), AppError> {
         .rows_affected();
     deleted += expired_oauth_flows;
 
+    let dead_refresh_tokens =
+        sqlx::query("DELETE FROM refresh_tokens WHERE expires_at < now() OR revoked_at < now() - interval '7 days'")
+            .execute(&state.core.db)
+            .await?
+            .rows_affected();
+    deleted += dead_refresh_tokens;
+
     let reverted_plans = sqlx::query(
         r#"
         UPDATE users SET plan_id = 'free', plan_expires_at = NULL
@@ -177,6 +184,7 @@ async fn purge_expired_deletions(state: &AppState) -> Result<(u64, u64), AppErro
             "DELETE FROM pastes WHERE user_id = $1",
             "DELETE FROM short_links WHERE user_id = $1",
             "DELETE FROM api_keys WHERE user_id = $1",
+            "DELETE FROM refresh_tokens WHERE user_id = $1",
             "DELETE FROM passkeys WHERE user_id = $1",
             "DELETE FROM embed_presets WHERE user_id = $1",
             "DELETE FROM embed_settings WHERE user_id = $1",

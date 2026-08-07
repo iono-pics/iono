@@ -1,19 +1,19 @@
-use actix_web::{post, web, HttpResponse};
+use actix_web::{post, web, HttpRequest, HttpResponse};
 use iono_core::{
     auth::{
-        jwt,
         password::{hash_password_async, verify_password_async},
+        refresh,
+        refresh::SessionContext,
     },
     AppError,
 };
-use secrecy::ExposeSecret;
 use serde::Deserialize;
 use utoipa::ToSchema;
 use validator::Validate;
 
 use iono_core::web::ApiResult;
 
-use crate::{auth::JwtUser, state::AppState};
+use crate::{auth::JwtUser, routes::auth::signed_in_payload, state::AppState};
 
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct ChangePasswordRequest {
@@ -33,13 +33,14 @@ pub struct ChangePasswordRequest {
     request_body = ChangePasswordRequest,
     security(("bearer_auth" = [])),
     responses(
-        (status = 200, description = "password changed, returns a fresh access token"),
+        (status = 200, description = "password changed, other sessions ended, returns a fresh token pair"),
         (status = 400, description = "validation failed or account has no password set"),
         (status = 401, description = "missing/invalid token or incorrect current password")
     )
 )]
 #[post("/change-password")]
 pub async fn change_password(
+    req: HttpRequest,
     state: web::Data<AppState>,
     user: JwtUser,
     body: web::Json<ChangePasswordRequest>,
@@ -68,14 +69,15 @@ pub async fn change_password(
         .await
         .map_err(AppError::from)?;
 
-    let access_token = jwt::issue_access_token(
+    refresh::revoke_all_for_user(&state.db, &user.0.id).await?;
+
+    let payload = signed_in_payload(
+        &state,
         &user.0.id,
         new_token_version,
-        state.config.jwt_secret.expose_secret(),
-        state.config.jwt_access_ttl_minutes,
-    )?;
+        &SessionContext::from_request(&req),
+    )
+    .await?;
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "access_token": access_token,
-    })))
+    Ok(HttpResponse::Ok().json(payload))
 }

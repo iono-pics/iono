@@ -1,12 +1,18 @@
-use actix_web::{patch, web, HttpResponse};
-use iono_core::{auth::jwt, web::ApiResult, AppError};
-use secrecy::ExposeSecret;
+use actix_web::{patch, web, HttpRequest, HttpResponse};
+use iono_core::{
+    auth::{refresh, refresh::SessionContext},
+    web::ApiResult,
+    AppError,
+};
 use serde::Deserialize;
 use utoipa::ToSchema;
 
 use crate::{
     auth::JwtUser,
-    routes::user::totp::{require_reauth, ReauthRequest},
+    routes::{
+        auth::signed_in_payload,
+        user::totp::{require_reauth, ReauthRequest},
+    },
     state::AppState,
 };
 
@@ -23,13 +29,14 @@ pub struct RequirePasskeyRequest {
     request_body = RequirePasskeyRequest,
     security(("bearer_auth" = [])),
     responses(
-        (status = 200, description = "passkey requirement updated and returns a new access token"),
+        (status = 200, description = "passkey requirement updated, other sessions ended, returns a fresh token pair"),
         (status = 400, description = "validation failed, or enabling requires at least one registered passkey"),
         (status = 401, description = "missing/invalid token or failed authentication")
     )
 )]
 #[patch("/passkeys/require")]
 pub async fn require_passkey(
+    req: HttpRequest,
     state: web::Data<AppState>,
     user: JwtUser,
     body: web::Json<RequirePasskeyRequest>,
@@ -61,14 +68,15 @@ pub async fn require_passkey(
         .await
         .map_err(AppError::from)?;
 
-    let access_token = jwt::issue_access_token(
+    refresh::revoke_all_for_user(&state.db, &user.0.id).await?;
+
+    let payload = signed_in_payload(
+        &state,
         &user.0.id,
         new_token_version,
-        state.config.jwt_secret.expose_secret(),
-        state.config.jwt_access_ttl_minutes,
-    )?;
+        &SessionContext::from_request(&req),
+    )
+    .await?;
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "access_token": access_token,
-    })))
+    Ok(HttpResponse::Ok().json(payload))
 }

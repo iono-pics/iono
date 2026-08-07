@@ -1,14 +1,14 @@
-use actix_web::{get, http::header, web, HttpResponse};
-use iono_core::{web::ApiResult, AppError};
+use actix_web::{get, http::header, web, HttpRequest, HttpResponse};
+use iono_core::{auth::refresh::SessionContext, web::ApiResult, AppError};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use secrecy::ExposeSecret;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::Value;
 
 use crate::{
     routes::auth::{
         discord::{consume_flow_and_fetch, link_to_user, login_or_signup, LoginOutcome},
-        MfaChallenge,
+        signed_in_payload, MfaChallenge,
     },
     state::AppState,
 };
@@ -21,7 +21,7 @@ pub struct CallbackQuery {
 }
 
 enum Outcome {
-    SignedIn(String),
+    SignedIn(Value),
     MfaRequired(MfaChallenge),
     Linked,
     Error(String),
@@ -31,7 +31,7 @@ enum Outcome {
     get,
     path = "/auth/discord/callback",
     responses(
-        (status = 200, description = "signed in, returns { access_token }, or { mfa_required, mfa_token, methods } if the account has mfa"),
+        (status = 200, description = "signed in, returns { access_token, refresh_token, expires_in }, or { mfa_required, mfa_token, methods } if the account has mfa"),
         (status = 204, description = "discord linked to your account"),
         (status = 302, description = "redirect back to the app, result is passed as a url fragment"),
         (status = 400, description = "invalid callback"),
@@ -40,6 +40,7 @@ enum Outcome {
 )]
 #[get("/discord/callback")]
 pub async fn discord_callback(
+    req: HttpRequest,
     state: web::Data<AppState>,
     query: web::Query<CallbackQuery>,
 ) -> ApiResult<HttpResponse> {
@@ -66,14 +67,25 @@ pub async fn discord_callback(
     let login = login_or_signup(
         &state.db,
         state.config.jwt_secret.expose_secret(),
-        state.config.jwt_access_ttl_minutes,
         &tokens,
         &discord_user,
     )
     .await?;
 
     let outcome = match login {
-        LoginOutcome::SignedIn { access_token, .. } => Outcome::SignedIn(access_token),
+        LoginOutcome::SignedIn {
+            user_id,
+            token_version,
+            ..
+        } => Outcome::SignedIn(
+            signed_in_payload(
+                &state,
+                &user_id,
+                token_version,
+                &SessionContext::from_request(&req),
+            )
+            .await?,
+        ),
         LoginOutcome::MfaRequired(challenge) => Outcome::MfaRequired(challenge),
     };
     respond(&state, outcome)
@@ -83,8 +95,14 @@ fn respond(state: &AppState, outcome: Outcome) -> ApiResult<HttpResponse> {
     if let Some(base) = state.config.discord_success_redirect_url.as_deref() {
         let base = base.split('#').next().unwrap_or(base);
         let fragment = match &outcome {
-            Outcome::SignedIn(token) => {
-                format!("token={}", utf8_percent_encode(token, NON_ALPHANUMERIC))
+            Outcome::SignedIn(payload) => {
+                let field = |key: &str| payload[key].as_str().unwrap_or_default().to_string();
+                format!(
+                    "token={}&refresh_token={}&expires_in={}",
+                    utf8_percent_encode(&field("access_token"), NON_ALPHANUMERIC),
+                    utf8_percent_encode(&field("refresh_token"), NON_ALPHANUMERIC),
+                    payload["expires_in"].as_i64().unwrap_or_default(),
+                )
             }
             Outcome::MfaRequired(challenge) => format!(
                 "mfa_required=1&mfa_token={}&methods={}",
@@ -103,9 +121,7 @@ fn respond(state: &AppState, outcome: Outcome) -> ApiResult<HttpResponse> {
     }
 
     match outcome {
-        Outcome::SignedIn(access_token) => {
-            Ok(HttpResponse::Ok().json(json!({ "access_token": access_token })))
-        }
+        Outcome::SignedIn(payload) => Ok(HttpResponse::Ok().json(payload)),
         Outcome::MfaRequired(challenge) => Ok(HttpResponse::Ok().json(challenge.json())),
         Outcome::Linked => Ok(HttpResponse::NoContent().finish()),
         Outcome::Error(err) => Err(AppError::BadRequest(err).into()),

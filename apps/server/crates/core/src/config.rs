@@ -22,6 +22,7 @@ pub struct Config {
 
     pub jwt_secret: SecretString,
     pub jwt_access_ttl_minutes: i64,
+    pub refresh_token_ttl_days: i64,
 
     pub auth_rate_limit_seconds_per_request: u64,
     pub auth_rate_limit_burst: u32,
@@ -114,9 +115,12 @@ impl Config {
                     .filter(|s| !s.is_empty())
                     .expect("JWT_SECRET must be set"),
             ),
-            jwt_access_ttl_minutes: env_or("JWT_ACCESS_TTL_MINUTES", "1440")
+            jwt_access_ttl_minutes: env_or("JWT_ACCESS_TTL_MINUTES", "15")
                 .parse()
                 .expect("JWT_ACCESS_TTL_MINUTES malformed"),
+            refresh_token_ttl_days: env_or("REFRESH_TOKEN_TTL_DAYS", "30")
+                .parse()
+                .expect("REFRESH_TOKEN_TTL_DAYS malformed"),
 
             auth_rate_limit_seconds_per_request: env_or("AUTH_RATE_LIMIT_SECONDS_PER_REQUEST", "2")
                 .parse()

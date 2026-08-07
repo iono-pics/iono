@@ -1,8 +1,11 @@
-use actix_web::{post, web, HttpResponse};
-use iono_core::{auth::jwt, web::ApiResult, AppError};
-use secrecy::ExposeSecret;
+use actix_web::{post, web, HttpRequest, HttpResponse};
+use iono_core::{
+    auth::{refresh, refresh::SessionContext},
+    web::ApiResult,
+    AppError,
+};
 
-use crate::{auth::JwtUser, state::AppState};
+use crate::{auth::JwtUser, routes::auth::signed_in_payload, state::AppState};
 
 use super::{require_reauth, ReauthRequest};
 
@@ -12,13 +15,14 @@ use super::{require_reauth, ReauthRequest};
     request_body = ReauthRequest,
     security(("bearer_auth" = [])),
     responses(
-        (status = 200, description = "totp disabled and returns a fresh access token"),
+        (status = 200, description = "totp disabled, other sessions ended, returns a fresh token pair"),
         (status = 400, description = "validation failed"),
         (status = 401, description = "missing/invalid token or failed authentication")
     )
 )]
 #[post("/totp/disable")]
 pub async fn disable_totp(
+    req: HttpRequest,
     state: web::Data<AppState>,
     user: JwtUser,
     body: web::Json<ReauthRequest>,
@@ -44,16 +48,17 @@ pub async fn disable_totp(
         .await
         .map_err(AppError::from)?;
 
+    refresh::revoke_all_for_user(&mut *tx, &user.0.id).await?;
+
     tx.commit().await.map_err(AppError::from)?;
 
-    let access_token = jwt::issue_access_token(
+    let payload = signed_in_payload(
+        &state,
         &user.0.id,
         new_token_version,
-        state.config.jwt_secret.expose_secret(),
-        state.config.jwt_access_ttl_minutes,
-    )?;
+        &SessionContext::from_request(&req),
+    )
+    .await?;
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "access_token": access_token,
-    })))
+    Ok(HttpResponse::Ok().json(payload))
 }

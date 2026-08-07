@@ -4,7 +4,7 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 
-use crate::auth::{api_key, jwt, token};
+use crate::auth::{api_key, jwt, refresh, token};
 use crate::entities::User;
 use crate::state::{HasDb, HasJwtSecret};
 use crate::web::{state_and_bearer, ApiError};
@@ -20,6 +20,10 @@ impl<S: HasDb + HasJwtSecret + 'static> FromRequest for AuthedUser<S> {
         Box::pin(async move {
             let (state, bearer) = fut.await?;
             let bearer_token = bearer.token();
+
+            if bearer_token.starts_with(refresh::REFRESH_TOKEN_PREFIX) {
+                return Err(ApiError(crate::AppError::Unauthorized));
+            }
 
             let user = if bearer_token.starts_with(token::API_KEY_PREFIX) {
                 api_key::authenticate(state.db(), bearer_token).await?

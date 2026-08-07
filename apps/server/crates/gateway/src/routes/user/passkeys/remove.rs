@@ -1,10 +1,17 @@
-use actix_web::{post, web, HttpResponse};
-use iono_core::{auth::jwt, entities::PasskeyCredential, web::ApiResult, AppError};
-use secrecy::ExposeSecret;
+use actix_web::{post, web, HttpRequest, HttpResponse};
+use iono_core::{
+    auth::{refresh, refresh::SessionContext},
+    entities::PasskeyCredential,
+    web::ApiResult,
+    AppError,
+};
 
 use crate::{
     auth::JwtUser,
-    routes::user::totp::{require_reauth, ReauthRequest},
+    routes::{
+        auth::signed_in_payload,
+        user::totp::{require_reauth, ReauthRequest},
+    },
     state::AppState,
 };
 
@@ -15,7 +22,7 @@ use crate::{
     security(("bearer_auth" = [])),
     params(("id" = String, Path, description = "passkey id")),
     responses(
-        (status = 200, description = "passkey removed and returns a fresh access token"),
+        (status = 200, description = "passkey removed, other sessions ended, returns a fresh token pair"),
         (status = 400, description = "validation failed, or removing the last passkey while passkeys are required"),
         (status = 401, description = "missing/invalid token or failed authentication"),
         (status = 404, description = "no such passkey")
@@ -23,6 +30,7 @@ use crate::{
 )]
 #[post("/passkeys/{id}/remove")]
 pub async fn remove_passkey(
+    req: HttpRequest,
     state: web::Data<AppState>,
     user: JwtUser,
     path: web::Path<String>,
@@ -76,16 +84,17 @@ pub async fn remove_passkey(
         .await
         .map_err(AppError::from)?;
 
+    refresh::revoke_all_for_user(&mut *tx, &user.0.id).await?;
+
     tx.commit().await.map_err(AppError::from)?;
 
-    let access_token = jwt::issue_access_token(
+    let payload = signed_in_payload(
+        &state,
         &user.0.id,
         new_token_version,
-        state.config.jwt_secret.expose_secret(),
-        state.config.jwt_access_ttl_minutes,
-    )?;
+        &SessionContext::from_request(&req),
+    )
+    .await?;
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "access_token": access_token,
-    })))
+    Ok(HttpResponse::Ok().json(payload))
 }

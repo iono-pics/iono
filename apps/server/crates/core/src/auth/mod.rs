@@ -2,6 +2,7 @@ pub mod api_key;
 pub mod authed;
 pub mod jwt;
 pub mod password;
+pub mod refresh;
 pub mod token;
 pub mod totp;
 pub mod webauthn;

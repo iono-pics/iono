@@ -1,16 +1,15 @@
-use actix_web::{post, web, HttpResponse};
+use actix_web::{post, web, HttpRequest, HttpResponse};
 use iono_core::{
-    auth::{jwt, webauthn},
+    auth::{refresh::SessionContext, webauthn},
     entities::{PasskeyCredential, User},
     web::ApiResult,
     AppError,
 };
-use secrecy::ExposeSecret;
 use serde::Deserialize;
 use utoipa::ToSchema;
 use webauthn_rs::prelude::{PasskeyAuthentication, PublicKeyCredential};
 
-use crate::{state::AppState, webauthn_sessions};
+use crate::{routes::auth::signed_in_payload, state::AppState, webauthn_sessions};
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct PasskeyLoginFinishRequest {
@@ -30,6 +29,7 @@ pub struct PasskeyLoginFinishRequest {
 )]
 #[post("/passkey/login/finish")]
 pub async fn passkey_login_finish(
+    req: HttpRequest,
     state: web::Data<AppState>,
     body: web::Json<PasskeyLoginFinishRequest>,
 ) -> ApiResult<HttpResponse> {
@@ -75,14 +75,13 @@ pub async fn passkey_login_finish(
 
     tx.commit().await.map_err(AppError::from)?;
 
-    let access_token = jwt::issue_access_token(
+    let payload = signed_in_payload(
+        &state,
         &user.id,
         user.token_version,
-        state.config.jwt_secret.expose_secret(),
-        state.config.jwt_access_ttl_minutes,
-    )?;
+        &SessionContext::from_request(&req),
+    )
+    .await?;
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "access_token": access_token,
-    })))
+    Ok(HttpResponse::Ok().json(payload))
 }

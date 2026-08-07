@@ -1,8 +1,11 @@
-use actix_web::{post, web, HttpResponse};
-use iono_core::{auth::jwt, web::ApiResult, AppError};
-use secrecy::ExposeSecret;
+use actix_web::{post, web, HttpRequest, HttpResponse};
+use iono_core::{
+    auth::{refresh, refresh::SessionContext},
+    web::ApiResult,
+    AppError,
+};
 
-use crate::{auth::JwtUser, state::AppState};
+use crate::{auth::JwtUser, routes::auth::signed_in_payload, state::AppState};
 
 use super::{replace_recovery_codes, require_reauth, ReauthRequest};
 
@@ -12,13 +15,14 @@ use super::{replace_recovery_codes, require_reauth, ReauthRequest};
     request_body = ReauthRequest,
     security(("bearer_auth" = [])),
     responses(
-        (status = 200, description = "returns new recovery codes and a new access token"),
+        (status = 200, description = "returns new recovery codes and a fresh token pair; other sessions are ended"),
         (status = 400, description = "validation failed"),
         (status = 401, description = "missing/invalid token or failed authentication")
     )
 )]
 #[post("/totp/recovery-codes/regenerate")]
 pub async fn regenerate_recovery_codes(
+    req: HttpRequest,
     state: web::Data<AppState>,
     user: JwtUser,
     body: web::Json<ReauthRequest>,
@@ -39,17 +43,18 @@ pub async fn regenerate_recovery_codes(
         .await
         .map_err(AppError::from)?;
 
+    refresh::revoke_all_for_user(&mut *tx, &user.0.id).await?;
+
     tx.commit().await.map_err(AppError::from)?;
 
-    let access_token = jwt::issue_access_token(
+    let mut payload = signed_in_payload(
+        &state,
         &user.0.id,
         new_token_version,
-        state.config.jwt_secret.expose_secret(),
-        state.config.jwt_access_ttl_minutes,
-    )?;
+        &SessionContext::from_request(&req),
+    )
+    .await?;
+    payload["recovery_codes"] = recovery_codes.into();
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "recovery_codes": recovery_codes,
-        "access_token": access_token,
-    })))
+    Ok(HttpResponse::Ok().json(payload))
 }

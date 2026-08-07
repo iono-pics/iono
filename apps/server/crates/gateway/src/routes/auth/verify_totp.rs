@@ -1,6 +1,6 @@
-use actix_web::{post, web, HttpResponse};
+use actix_web::{post, web, HttpRequest, HttpResponse};
 use iono_core::{
-    auth::{jwt, password::verify_password_async, totp},
+    auth::{jwt, password::verify_password_async, refresh::SessionContext, totp},
     entities::{TotpRecoveryCode, User},
     AppError,
 };
@@ -10,7 +10,7 @@ use utoipa::ToSchema;
 
 use iono_core::web::ApiResult;
 
-use crate::state::AppState;
+use crate::{routes::auth::signed_in_payload, state::AppState};
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct VerifyLoginTotpRequest {
@@ -31,6 +31,7 @@ pub struct VerifyLoginTotpRequest {
 )]
 #[post("/login/verify-totp")]
 pub async fn verify_login_totp(
+    req: HttpRequest,
     state: web::Data<AppState>,
     body: web::Json<VerifyLoginTotpRequest>,
 ) -> ApiResult<HttpResponse> {
@@ -89,14 +90,13 @@ pub async fn verify_login_totp(
         }
     }
 
-    let access_token = jwt::issue_access_token(
+    let payload = signed_in_payload(
+        &state,
         &user.id,
         user.token_version,
-        state.config.jwt_secret.expose_secret(),
-        state.config.jwt_access_ttl_minutes,
-    )?;
+        &SessionContext::from_request(&req),
+    )
+    .await?;
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "access_token": access_token,
-    })))
+    Ok(HttpResponse::Ok().json(payload))
 }

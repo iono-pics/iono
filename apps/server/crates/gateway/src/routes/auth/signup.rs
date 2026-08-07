@@ -1,11 +1,10 @@
-use actix_web::{post, web, HttpResponse};
+use actix_web::{post, web, HttpRequest, HttpResponse};
 use email_address::EmailAddress;
 use iono_core::{
-    auth::{jwt, password::hash_password_async, token},
+    auth::{password::hash_password_async, refresh::SessionContext, token},
     entities::User,
     AppError,
 };
-use secrecy::ExposeSecret;
 use serde::Deserialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -13,7 +12,7 @@ use validator::{Validate, ValidationError};
 
 use iono_core::web::ApiResult;
 
-use crate::state::AppState;
+use crate::{routes::auth::signed_in_payload, state::AppState};
 
 #[derive(Deserialize, Validate, ToSchema)]
 pub struct SignupRequest {
@@ -62,6 +61,7 @@ fn email(email: &str) -> Result<(), ValidationError> {
 )]
 #[post("/signup")]
 pub async fn signup(
+    req: HttpRequest,
     state: web::Data<AppState>,
     body: web::Json<SignupRequest>,
 ) -> ApiResult<HttpResponse> {
@@ -104,14 +104,13 @@ pub async fn signup(
     .await
     .map_err(AppError::from)?;
 
-    let access_token = jwt::issue_access_token(
+    let payload = signed_in_payload(
+        &state,
         &user.id,
         user.token_version,
-        state.config.jwt_secret.expose_secret(),
-        state.config.jwt_access_ttl_minutes,
-    )?;
+        &SessionContext::from_request(&req),
+    )
+    .await?;
 
-    Ok(HttpResponse::Created().json(serde_json::json!({
-        "access_token": access_token,
-    })))
+    Ok(HttpResponse::Created().json(payload))
 }

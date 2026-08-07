@@ -1,6 +1,6 @@
-use actix_web::{post, web, HttpResponse};
+use actix_web::{post, web, HttpRequest, HttpResponse};
 use iono_core::{
-    auth::{jwt, password::verify_password_async},
+    auth::{password::verify_password_async, refresh::SessionContext},
     entities::User,
     AppError,
 };
@@ -10,7 +10,10 @@ use utoipa::ToSchema;
 
 use iono_core::web::ApiResult;
 
-use crate::{routes::auth::mfa_challenge, state::AppState};
+use crate::{
+    routes::auth::{mfa_challenge, signed_in_payload},
+    state::AppState,
+};
 
 #[derive(Deserialize, ToSchema)]
 pub struct LoginRequest {
@@ -24,12 +27,13 @@ pub struct LoginRequest {
     path = "/auth/login",
     request_body = LoginRequest,
     responses(
-        (status = 200, description = "returns access token, or {mfa_required: true, mfa_token} if mfa is enable"),
+        (status = 200, description = "returns access token and refresh token, or {mfa_required: true, mfa_token} if mfa is enabled"),
         (status = 401, description = "invalid credentials")
     )
 )]
 #[post("/login")]
 pub async fn login(
+    req: HttpRequest,
     state: web::Data<AppState>,
     body: web::Json<LoginRequest>,
 ) -> ApiResult<HttpResponse> {
@@ -56,14 +60,13 @@ pub async fn login(
         return Ok(HttpResponse::Ok().json(challenge.json()));
     }
 
-    let access_token = jwt::issue_access_token(
+    let payload = signed_in_payload(
+        &state,
         &user.id,
         user.token_version,
-        state.config.jwt_secret.expose_secret(),
-        state.config.jwt_access_ttl_minutes,
-    )?;
+        &SessionContext::from_request(&req),
+    )
+    .await?;
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "access_token": access_token,
-    })))
+    Ok(HttpResponse::Ok().json(payload))
 }

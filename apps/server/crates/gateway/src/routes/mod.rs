@@ -15,6 +15,8 @@ use utoipa::OpenApi;
     paths(
         auth::signup::signup,
         auth::login::login,
+        auth::refresh::refresh,
+        auth::logout::logout,
         auth::verify_totp::verify_login_totp,
         auth::verify_passkey_start::verify_passkey_start,
         auth::verify_passkey_finish::verify_passkey_finish,
@@ -71,6 +73,8 @@ use utoipa::OpenApi;
     components(schemas(
         auth::signup::SignupRequest,
         auth::login::LoginRequest,
+        auth::refresh::RefreshRequest,
+        auth::logout::LogoutRequest,
         auth::verify_totp::VerifyLoginTotpRequest,
         auth::verify_passkey_start::VerifyPasskeyStartRequest,
         auth::verify_passkey_finish::VerifyPasskeyFinishRequest,
