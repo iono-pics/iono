@@ -231,6 +231,56 @@ mod tests {
     }
 
     #[test]
+    fn layering_chunk_by_chunk_matches_encrypting_the_whole_buffer() {
+        let (user_key, user_iv) = (random_key(), random_iv());
+        let (dek, dek_iv) = (random_key(), random_iv());
+        let plain: Vec<u8> = (0..9001u32).map(|i| (i % 251) as u8).collect();
+
+        let mut whole = plain.clone();
+        encrypt_buffer(&user_key, &user_iv, &mut whole).unwrap();
+        encrypt_buffer(&dek, &dek_iv, &mut whole).unwrap();
+
+        let mut layers = Layers::new(vec![
+            Keystream::at(&dek, &dek_iv, 0).unwrap(),
+            Keystream::at(&user_key, &user_iv, 0).unwrap(),
+        ]);
+        let mut streamed = Vec::new();
+        for chunk in plain.chunks(1000) {
+            let mut chunk = chunk.to_vec();
+            layers.apply(&mut chunk);
+            streamed.extend_from_slice(&chunk);
+        }
+
+        assert_eq!(streamed, whole);
+    }
+
+    #[test]
+    fn layering_is_independent_of_chunk_size() {
+        let (key, iv) = (random_key(), random_iv());
+        let plain: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+
+        let encrypt_in_chunks = |size: usize| {
+            let mut layers = Layers::new(vec![Keystream::at(&key, &iv, 0).unwrap()]);
+            let mut out = Vec::new();
+            for chunk in plain.chunks(size) {
+                let mut chunk = chunk.to_vec();
+                layers.apply(&mut chunk);
+                out.extend_from_slice(&chunk);
+            }
+            out
+        };
+
+        let reference = encrypt_in_chunks(plain.len());
+        for size in [1usize, 15, 16, 17, 64, 4096] {
+            assert_eq!(
+                encrypt_in_chunks(size),
+                reference,
+                "differed at chunk {size}"
+            );
+        }
+    }
+
+    #[test]
     fn a_wrong_key_does_not_recover_the_plaintext() {
         let (key, iv) = (random_key(), random_iv());
         let plain = b"secret".to_vec();

@@ -56,6 +56,8 @@ pub struct Config {
 
     pub max_upload_size_bytes: usize,
 
+    pub max_image_decode_bytes: usize,
+
     pub cloudflare_zone_id: Option<String>,
     pub cloudflare_api_token: Option<SecretString>,
 
@@ -175,7 +177,7 @@ impl Config {
             encrypt_backfill_batch_size: env_or("ENCRYPT_BACKFILL_BATCH_SIZE", "100")
                 .parse()
                 .expect("ENCRYPT_BACKFILL_BATCH_SIZE malformed"),
-            encrypt_backfill_max_object_bytes: env_or("ENCRYPT_BACKFILL_MAX_OBJECT_MB", "512")
+            encrypt_backfill_max_object_bytes: env_or("ENCRYPT_BACKFILL_MAX_OBJECT_MB", "10240")
                 .parse::<i64>()
                 .expect("ENCRYPT_BACKFILL_MAX_OBJECT_MB malformed")
                 * 1024
@@ -196,6 +198,12 @@ impl Config {
             max_upload_size_bytes: env_or("MAX_UPLOAD_SIZE_MB", "10240")
                 .parse::<usize>()
                 .expect("MAX_UPLOAD_SIZE_MB malformed")
+                * 1024
+                * 1024,
+
+            max_image_decode_bytes: env_or("MAX_IMAGE_DECODE_SIZE_MB", "32")
+                .parse::<usize>()
+                .expect("MAX_IMAGE_DECODE_SIZE_MB malformed")
                 * 1024
                 * 1024,
 

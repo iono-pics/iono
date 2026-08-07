@@ -1,15 +1,11 @@
-use actix_multipart::form::MultipartFormConfig;
 use actix_web::{http::Method, web, App, HttpServer};
 use secrecy::ExposeSecret;
 use tracing_actix_web::TracingLogger;
-
-use iono_core::AppError;
 
 mod auth;
 mod routes;
 mod state;
 
-use iono_core::web::ApiError;
 use state::AppState;
 
 #[actix_web::main]
@@ -20,7 +16,6 @@ async fn main() -> std::io::Result<()> {
 
     let host = config.host.clone();
     let port = config.ingest_port;
-    let max_upload = config.max_upload_size_bytes;
 
     tracing::info!("iono-ingest listening on http://{}:{}", host, port);
 
@@ -35,14 +30,6 @@ async fn main() -> std::io::Result<()> {
             .wrap(TracingLogger::default())
             .wrap(actix_web::middleware::NormalizePath::trim())
             .app_data(state.clone())
-            .app_data(
-                MultipartFormConfig::default()
-                    .total_limit(max_upload)
-                    .memory_limit(max_upload)
-                    .error_handler(|err, _req| {
-                        ApiError(AppError::BadRequest(err.to_string())).into()
-                    }),
-            )
             .configure(move |cfg| routes::configure(cfg, &governor))
     })
     .bind((host, port))?

@@ -50,6 +50,10 @@ pub fn is_inline_safe(mime_type: &str) -> bool {
     is_trusted_image_signature(mime_type) || is_trusted_video_signature(mime_type)
 }
 
+pub fn needs_whole_body(bytes: &[u8]) -> bool {
+    infer::get(bytes).is_some_and(|kind| is_trusted_image_signature(kind.mime_type()))
+}
+
 fn decodes_as_image(bytes: &[u8]) -> bool {
     let Ok(mut reader) = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format() else {
         return false;
@@ -85,6 +89,21 @@ mod tests {
             .unwrap();
 
         assert_eq!(detect(&bytes), "image/png");
+    }
+
+    #[test]
+    fn only_image_signatures_need_the_whole_body() {
+        let img = image::RgbImage::new(2, 2);
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+
+        assert!(needs_whole_body(&png), "a png header must ask for the body");
+        assert!(needs_whole_body(b"GIF89a\0\0\0\0\0\0\0\0"));
+
+        assert!(!needs_whole_body(b"not a signature at all"));
+        assert!(!needs_whole_body(&[]));
     }
 
     #[test]

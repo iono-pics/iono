@@ -8,4 +8,5 @@ pub struct AppState {
     pub maintenance_token: SecretString,
     pub bg: tokio::runtime::Handle,
     pub sweep_task: Mutex<Option<JoinHandle<()>>>,
+    pub backfill_task: Mutex<Option<JoinHandle<()>>>,
 }

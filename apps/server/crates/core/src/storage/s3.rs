@@ -2,14 +2,19 @@ use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart, Delete, ObjectIdentifier};
 use aws_sdk_s3::Client;
+use bytes::Bytes;
+use futures_util::stream::BoxStream;
+use futures_util::StreamExt;
 use secrecy::ExposeSecret;
 use std::collections::HashSet;
 
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
 use crate::storage::{Storage, StoredObject};
+
+const PART_SIZE: usize = 8 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct S3Storage {
@@ -42,6 +47,103 @@ impl S3Storage {
             bucket: config.s3_bucket.clone(),
         })
     }
+
+    async fn begin_multipart(&self, key: &str, content_type: &str) -> AppResult<String> {
+        self.client
+            .create_multipart_upload()
+            .bucket(&self.bucket)
+            .key(key)
+            .content_type(content_type)
+            .send()
+            .await
+            .map_err(|e| AppError::internal_from("s3 create_multipart_upload failed", e))?
+            .upload_id()
+            .map(str::to_owned)
+            .ok_or_else(|| AppError::internal("s3 create_multipart_upload returned no upload id"))
+    }
+
+    async fn put_part(
+        &self,
+        key: &str,
+        upload_id: &str,
+        part_number: i32,
+        body: Vec<u8>,
+    ) -> AppResult<CompletedPart> {
+        let out = self
+            .client
+            .upload_part()
+            .bucket(&self.bucket)
+            .key(key)
+            .upload_id(upload_id)
+            .part_number(part_number)
+            .body(ByteStream::from(body))
+            .send()
+            .await
+            .map_err(|e| AppError::internal_from("s3 upload_part failed", e))?;
+
+        Ok(CompletedPart::builder()
+            .part_number(part_number)
+            .set_e_tag(out.e_tag().map(str::to_owned))
+            .build())
+    }
+
+    async fn write_parts(
+        &self,
+        key: &str,
+        content_type: &str,
+        mut stream: BoxStream<'static, AppResult<Bytes>>,
+        upload_id: &mut Option<String>,
+    ) -> AppResult<()> {
+        let mut buf: Vec<u8> = Vec::with_capacity(PART_SIZE);
+        let mut parts: Vec<CompletedPart> = Vec::new();
+
+        while let Some(chunk) = stream.next().await {
+            buf.extend_from_slice(&chunk?);
+            if buf.len() < PART_SIZE {
+                continue;
+            }
+
+            let id = match upload_id {
+                Some(id) => id.clone(),
+                None => {
+                    let id = self.begin_multipart(key, content_type).await?;
+                    *upload_id = Some(id.clone());
+                    id
+                }
+            };
+
+            let body = std::mem::replace(&mut buf, Vec::with_capacity(PART_SIZE));
+            let part = self
+                .put_part(key, &id, parts.len() as i32 + 1, body)
+                .await?;
+            parts.push(part);
+        }
+
+        let Some(id) = upload_id.clone() else {
+            return self.save(key, &buf, content_type).await;
+        };
+
+        if !buf.is_empty() {
+            let part = self.put_part(key, &id, parts.len() as i32 + 1, buf).await?;
+            parts.push(part);
+        }
+
+        self.client
+            .complete_multipart_upload()
+            .bucket(&self.bucket)
+            .key(key)
+            .upload_id(&id)
+            .multipart_upload(
+                CompletedMultipartUpload::builder()
+                    .set_parts(Some(parts))
+                    .build(),
+            )
+            .send()
+            .await
+            .map_err(|e| AppError::internal_from("s3 complete_multipart_upload failed", e))?;
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -57,6 +159,34 @@ impl Storage for S3Storage {
             .await
             .map_err(|e| AppError::internal_from("s3 put_object failed", e))?;
         Ok(())
+    }
+
+    async fn save_stream(
+        &self,
+        key: &str,
+        content_type: &str,
+        stream: BoxStream<'static, AppResult<Bytes>>,
+    ) -> AppResult<()> {
+        let mut upload_id = None;
+        let result = self
+            .write_parts(key, content_type, stream, &mut upload_id)
+            .await;
+
+        if let (Err(_), Some(id)) = (&result, &upload_id) {
+            if let Err(e) = self
+                .client
+                .abort_multipart_upload()
+                .bucket(&self.bucket)
+                .key(key)
+                .upload_id(id)
+                .send()
+                .await
+            {
+                tracing::warn!(key = %key, error = ?e, "could not abort multipart upload");
+            }
+        }
+
+        result
     }
 
     async fn get(&self, key: &str, range: Option<&str>) -> AppResult<StoredObject> {

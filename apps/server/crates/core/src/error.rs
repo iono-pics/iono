@@ -17,6 +17,9 @@ pub enum AppError {
     #[error("payment required: {0}")]
     PaymentRequired(String),
 
+    #[error("payload too large: {0}")]
+    PayloadTooLarge(String),
+
     #[error("range not satisfiable")]
     RangeNotSatisfiable,
 

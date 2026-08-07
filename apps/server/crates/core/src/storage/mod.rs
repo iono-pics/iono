@@ -18,6 +18,12 @@ pub struct StoredObject {
 #[async_trait]
 pub trait Storage: Send + Sync {
     async fn save(&self, key: &str, data: &[u8], content_type: &str) -> AppResult<()>;
+    async fn save_stream(
+        &self,
+        key: &str,
+        content_type: &str,
+        stream: BoxStream<'static, AppResult<Bytes>>,
+    ) -> AppResult<()>;
     async fn get(&self, key: &str, range: Option<&str>) -> AppResult<StoredObject>;
     async fn delete(&self, key: &str) -> AppResult<()>;
     async fn delete_many(&self, keys: &[String]) -> AppResult<Vec<String>>;

@@ -2586,7 +2586,11 @@ dependencies = [
  "actix-governor",
  "actix-multipart",
  "actix-web",
+ "bytes",
  "chrono",
+ "dotenvy",
+ "futures-util",
+ "image",
  "iono-core",
  "secrecy",
  "serde",
@@ -2605,6 +2609,8 @@ version = "0.1.0"
 dependencies = [
  "actix-web",
  "actix-web-httpauth",
+ "bytes",
+ "dotenvy",
  "futures-util",
  "iono-core",
  "secrecy",
@@ -2614,6 +2620,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-actix-web",
+ "uuid",
 ]
 
 [[package]]

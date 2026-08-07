@@ -92,6 +92,7 @@ impl ResponseError for ApiError {
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::PaymentRequired(_) => StatusCode::PAYMENT_REQUIRED,
+            AppError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             AppError::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
             AppError::Gone(_) => StatusCode::GONE,
             AppError::Database(_) | AppError::Io(_) | AppError::Internal { .. } => {

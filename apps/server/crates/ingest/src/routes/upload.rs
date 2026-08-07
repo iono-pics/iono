@@ -1,12 +1,19 @@
-use actix_multipart::form::{bytes::Bytes, text::Text, MultipartForm};
-use actix_web::{post, web, HttpResponse};
+use actix_multipart::{Field, Multipart};
+use actix_web::{http::header, post, web, HttpRequest, HttpResponse};
+use bytes::Bytes;
 use chrono::{Duration, Utc};
+use futures_util::{stream, TryStreamExt};
 use iono_core::{
     auth::{password::hash_password_async, token},
     content_type, crypto,
-    entities::{File, UserSettings},
-    validators, AppError,
+    entities::{File, Plan, UserSettings},
+    quota, validators, AppError,
 };
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use tokio::sync::mpsc;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -14,12 +21,19 @@ use iono_core::web::{append_query, ApiResult};
 
 use crate::{auth::ApiKeyUser, state::AppState};
 
-#[derive(MultipartForm, ToSchema)]
+const SNIFF_BYTES: usize = 8192;
+const MAX_TEXT_FIELD_BYTES: usize = 8192;
+const CHANNEL_DEPTH: usize = 4;
+const PUMP_CHUNK: usize = 256 * 1024;
+
+#[derive(ToSchema)]
 pub struct UploadForm {
     #[schema(value_type = String, format = Binary)]
-    file: Bytes,
+    #[allow(dead_code)]
+    file: Vec<u8>,
     #[schema(value_type = Option<String>)]
-    password: Option<Text<String>>,
+    #[allow(dead_code)]
+    password: Option<String>,
 }
 
 #[utoipa::path(
@@ -32,6 +46,7 @@ pub struct UploadForm {
         (status = 400, description = "missing or malformed file, or an invalid password"),
         (status = 401, description = "missing or invalid api key"),
         (status = 402, description = "plan size or storage quota exceeded"),
+        (status = 413, description = "file exceeded the server upload limit"),
         (status = 415, description = "body was not multipart/form-data")
     )
 )]
@@ -39,28 +54,9 @@ pub struct UploadForm {
 pub async fn upload_file(
     state: web::Data<AppState>,
     user: ApiKeyUser,
-    MultipartForm(form): MultipartForm<UploadForm>,
+    req: HttpRequest,
+    mut payload: Multipart,
 ) -> ApiResult<HttpResponse> {
-    let data = form.file.data;
-
-    if data.is_empty() {
-        return Err(AppError::BadRequest("missing file".into()).into());
-    }
-
-    let plain_password = form
-        .password
-        .map(|t| t.into_inner())
-        .filter(|p| !p.is_empty());
-    if let Some(password) = plain_password.as_deref() {
-        validators::password(password, 256)?;
-    }
-    let password_hash = match plain_password.clone() {
-        Some(p) => Some(hash_password_async(p).await?),
-        None => None,
-    };
-
-    iono_core::quota::check_before_upload(&state.db, &user.0.id, data.len() as i64).await?;
-
     let settings =
         sqlx::query_as::<_, UserSettings>("SELECT * FROM user_settings WHERE user_id = $1")
             .bind(&user.0.id)
@@ -69,46 +65,64 @@ pub async fn upload_file(
             .map_err(AppError::from)?
             .ok_or_else(|| AppError::internal("user has no settings configured"))?;
 
+    let plan = quota::plan_for_user(&state.db, &user.0.id).await?;
+    let used = quota::storage_used_bytes(&state.db, &user.0.id).await?;
+    let budget = Budget::new(&plan, used, state.config.max_upload_size_bytes);
+
+    if let Some(declared) = declared_length(&req) {
+        if declared > budget.limit {
+            return Err(budget.exceeded().into());
+        }
+    }
+
+    let mut plain_password: Option<String> = None;
+    let mut uploaded: Option<Uploaded> = None;
+
+    while let Some(field) = payload.try_next().await.map_err(malformed_body)? {
+        match field.name() {
+            Some("password") => {
+                let text = read_text_field(field).await?;
+                plain_password = Some(text).filter(|p| !p.is_empty());
+            }
+            Some("file") if uploaded.is_none() => {
+                uploaded =
+                    Some(store_field(&state, field, &budget, settings.encrypt_uploads).await?);
+            }
+            _ => drain_field(field).await?,
+        }
+    }
+
+    let Some(uploaded) = uploaded else {
+        return Err(AppError::BadRequest("missing file".into()).into());
+    };
+
+    if let Some(password) = plain_password.as_deref() {
+        validators::password(password, 256)?;
+    }
+    let password_hash = match plain_password.clone() {
+        Some(p) => Some(hash_password_async(p).await?),
+        None => None,
+    };
+
+    let (user_key, user_key_iv, user_key_hash) = match uploaded.user_key {
+        Some((key, iv)) => {
+            let encoded = crypto::encode_key(&key);
+            let hash = hash_password_async(encoded.clone()).await?;
+            (Some(encoded), Some(iv.to_vec()), Some(hash))
+        }
+        None => (None, None, None),
+    };
+
+    let dek_iv = crypto::random_iv();
+    let wrapped_dek = crypto::wrap_key(state.keyring.current(), &dek_iv, &uploaded.dek)?;
+    let encryption_key_version = state.keyring.current_version();
+
     let expires_at = settings
         .default_expires_in_seconds
         .map(|secs| Utc::now() + Duration::seconds(secs));
 
-    let (mime_type, data) = tokio::task::spawn_blocking(move || {
-        let mime_type = content_type::detect(&data);
-        (mime_type, data)
-    })
-    .await
-    .map_err(|e| AppError::internal_from("content-type detection task panicked", e))?;
-
-    let mut data = data.to_vec();
-
-    let (user_key, user_key_iv, user_key_hash) = if settings.encrypt_uploads {
-        let key = crypto::random_key();
-        let iv = crypto::random_iv();
-        crypto::encrypt_buffer(&key, &iv, &mut data)?;
-        let hash = hash_password_async(crypto::encode_key(&key)).await?;
-        (
-            Some(crypto::encode_key(&key)),
-            Some(iv.to_vec()),
-            Some(hash),
-        )
-    } else {
-        (None, None, None)
-    };
-
-    let dek = crypto::random_key();
-    let encryption_iv = crypto::random_iv();
-    crypto::encrypt_buffer(&dek, &encryption_iv, &mut data)?;
-
-    let dek_iv = crypto::random_iv();
-    let wrapped_dek = crypto::wrap_key(state.keyring.current(), &dek_iv, &dek)?;
-
-    let encryption_iv = encryption_iv.to_vec();
-    let encryption_key_version = state.keyring.current_version();
-
     let id = Uuid::new_v4().to_string();
-    let extension = content_type::extension_for(&mime_type);
-    let s3_key = format!("{}.{extension}", Uuid::new_v4());
+    let extension = content_type::extension_for(&uploaded.mime_type);
     let display_name_stem = token::generate_display_name(
         settings.display_name_length as usize,
         &settings.display_name_style,
@@ -118,21 +132,20 @@ pub async fn upload_file(
     } else {
         display_name_stem
     };
-    let size_bytes = data.len() as i64;
 
     let db = state.db.clone();
-    let storage = state.storage.clone();
     let user_id = user.0.id.clone();
-    let s3_key_finalize = s3_key.clone();
+    let Uploaded {
+        s3_key,
+        mime_type,
+        size_bytes,
+        encryption_iv,
+        ..
+    } = uploaded;
     let display_name_finalize = display_name.clone();
-    let mime_type_finalize = mime_type.clone();
 
-    // detached so a client disconnecting cant cancel between the S3 write and db insert
+    // detached so a client disconnecting cant orphan the object we just wrote
     let finalize = tokio::spawn(async move {
-        storage
-            .save(&s3_key_finalize, &data, &mime_type_finalize)
-            .await?;
-
         sqlx::query_as::<_, File>(
             r#"
             INSERT INTO files (id, user_id, display_name, original_name, content_type, size_bytes, password_hash, expires_at, encrypted, encryption_iv, user_key_iv, user_key_hash, encryption_key_version, wrapped_dek, dek_iv)
@@ -143,13 +156,13 @@ pub async fn upload_file(
         .bind(&id)
         .bind(&user_id)
         .bind(&display_name_finalize)
-        .bind(&s3_key_finalize)
-        .bind(&mime_type_finalize)
+        .bind(&s3_key)
+        .bind(&mime_type)
         .bind(size_bytes)
         .bind(&password_hash)
         .bind(expires_at)
         .bind(user_key_hash.is_some())
-        .bind(&encryption_iv)
+        .bind(encryption_iv.to_vec())
         .bind(&user_key_iv)
         .bind(&user_key_hash)
         .bind(encryption_key_version)
@@ -197,4 +210,560 @@ pub async fn upload_file(
     );
 
     Ok(HttpResponse::Created().json(serde_json::json!({ "url": url })))
+}
+
+struct Budget {
+    limit: u64,
+    plan_limit: i64,
+    remaining_quota: i64,
+}
+
+impl Budget {
+    fn new(plan: &Plan, used: i64, server_cap: usize) -> Self {
+        let remaining_quota = plan.storage_quota_bytes.saturating_sub(used).max(0);
+        let limit = plan
+            .max_upload_bytes
+            .max(0)
+            .min(remaining_quota)
+            .min(server_cap as i64) as u64;
+        Self {
+            limit,
+            plan_limit: plan.max_upload_bytes,
+            remaining_quota,
+        }
+    }
+
+    fn exceeded(&self) -> AppError {
+        if self.limit as i64 == self.plan_limit {
+            AppError::PaymentRequired("file is too large, consider upgrading your plan.".to_owned())
+        } else if self.limit as i64 == self.remaining_quota {
+            AppError::PaymentRequired(
+                "storage quota exceeded, consider upgrading your plan.".to_owned(),
+            )
+        } else {
+            AppError::PayloadTooLarge("file exceeds the maximum upload size".to_owned())
+        }
+    }
+}
+
+struct Uploaded {
+    s3_key: String,
+    mime_type: String,
+    size_bytes: i64,
+    encryption_iv: [u8; crypto::IV_LEN],
+    dek: [u8; crypto::KEY_LEN],
+    user_key: Option<([u8; crypto::KEY_LEN], [u8; crypto::IV_LEN])>,
+}
+
+async fn store_field(
+    state: &AppState,
+    field: Field,
+    budget: &Budget,
+    encrypt_for_user: bool,
+) -> Result<Uploaded, AppError> {
+    let mut prefix = Vec::with_capacity(SNIFF_BYTES);
+    let mut field = Some(field);
+    fill(&mut prefix, &mut field, SNIFF_BYTES).await?;
+    if prefix.is_empty() {
+        return Err(AppError::BadRequest("missing file".into()));
+    }
+
+    let mime_type = if content_type::needs_whole_body(&prefix) {
+        let limit = state.config.max_image_decode_bytes;
+        fill(&mut prefix, &mut field, limit + 1).await?;
+        if prefix.len() > limit {
+            content_type::FALLBACK_MIME_TYPE.to_string()
+        } else {
+            content_type::detect(&prefix)
+        }
+    } else {
+        content_type::detect(&prefix)
+    };
+
+    let extension = content_type::extension_for(&mime_type);
+    let s3_key = format!("{}.{extension}", Uuid::new_v4());
+
+    let user_key = encrypt_for_user.then(|| (crypto::random_key(), crypto::random_iv()));
+    let dek = crypto::random_key();
+    let encryption_iv = crypto::random_iv();
+
+    let mut keystreams = vec![crypto::Keystream::at(&dek, &encryption_iv, 0)?];
+    if let Some((key, iv)) = user_key {
+        keystreams.push(crypto::Keystream::at(&key, &iv, 0)?);
+    }
+
+    let mut layers = crypto::Layers::new(keystreams);
+
+    let (tx, rx) = mpsc::channel::<Result<Bytes, AppError>>(CHANNEL_DEPTH);
+
+    let storage = state.storage.clone();
+    let writer_key = s3_key.clone();
+    let writer_type = mime_type.clone();
+    let sent_whole_body = Arc::new(AtomicBool::new(false));
+    let writer_saw = sent_whole_body.clone();
+
+    let writer = tokio::spawn(async move {
+        let body = stream::unfold((rx, writer_saw, false), |(mut rx, saw, done)| async move {
+            if done {
+                return None;
+            }
+            match rx.recv().await {
+                Some(chunk) => Some((chunk, (rx, saw, false))),
+                None if saw.load(Ordering::SeqCst) => None,
+                None => {
+                    let e =
+                        AppError::BadRequest("upload ended before the body was complete".into());
+                    Some((Err(e), (rx, saw, true)))
+                }
+            }
+        });
+        storage
+            .save_stream(&writer_key, &writer_type, Box::pin(body))
+            .await
+    });
+
+    let mut written = 0u64;
+    let mut prefix = Bytes::from(prefix);
+
+    loop {
+        let chunk = if !prefix.is_empty() {
+            prefix.split_to(prefix.len().min(PUMP_CHUNK))
+        } else {
+            let Some(reading) = field.as_mut() else {
+                sent_whole_body.store(true, Ordering::SeqCst);
+                break;
+            };
+            match reading.try_next().await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => {
+                    sent_whole_body.store(true, Ordering::SeqCst);
+                    break;
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(malformed_body(e))).await;
+                    break;
+                }
+            }
+        };
+
+        written += chunk.len() as u64;
+        if written > budget.limit {
+            let _ = tx.send(Err(budget.exceeded())).await;
+            break;
+        }
+
+        let mut buf = chunk.to_vec();
+        layers.apply(&mut buf);
+        if tx.send(Ok(Bytes::from(buf))).await.is_err() {
+            break;
+        }
+    }
+
+    drop(tx);
+    writer
+        .await
+        .map_err(|e| AppError::internal_from("upload writer panicked", e))??;
+
+    Ok(Uploaded {
+        s3_key,
+        mime_type,
+        size_bytes: written as i64,
+        encryption_iv,
+        dek,
+        user_key,
+    })
+}
+
+async fn fill(buf: &mut Vec<u8>, field: &mut Option<Field>, target: usize) -> Result<(), AppError> {
+    while buf.len() < target {
+        let Some(reading) = field.as_mut() else {
+            return Ok(());
+        };
+        match reading.try_next().await.map_err(malformed_body)? {
+            Some(chunk) => buf.extend_from_slice(&chunk),
+            None => {
+                *field = None;
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn read_text_field(mut field: Field) -> Result<String, AppError> {
+    let mut buf = Vec::new();
+    while let Some(chunk) = field.try_next().await.map_err(malformed_body)? {
+        if buf.len() + chunk.len() > MAX_TEXT_FIELD_BYTES {
+            return Err(AppError::BadRequest("form field is too long".into()));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    String::from_utf8(buf).map_err(|_| AppError::BadRequest("form field is not valid utf-8".into()))
+}
+
+async fn drain_field(mut field: Field) -> Result<(), AppError> {
+    while field.try_next().await.map_err(malformed_body)?.is_some() {}
+    Ok(())
+}
+
+fn declared_length(req: &HttpRequest) -> Option<u64> {
+    req.headers()
+        .get(header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .parse()
+        .ok()
+}
+
+fn malformed_body(e: actix_multipart::MultipartError) -> AppError {
+    AppError::BadRequest(format!("malformed multipart body: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::{http::StatusCode, test, App};
+    use futures_util::StreamExt;
+    use iono_core::state::CoreState;
+    use iono_core::Config;
+
+    const BODY: usize = 20 * 1024 * 1024;
+    const BOUNDARY: &str = "----ionotestboundary";
+
+    struct Fixture {
+        state: web::Data<CoreState>,
+        user_id: String,
+        api_token: String,
+    }
+
+    impl Fixture {
+        async fn new(plan: &str) -> Self {
+            dotenvy::from_path("../../../.env").ok();
+            let state = web::Data::new(CoreState::build(&Config::from_env()).await);
+
+            let user_id = Uuid::new_v4().to_string();
+            let api_token = token::generate_api_token();
+
+            sqlx::query("INSERT INTO users (id, username, plan_id) VALUES ($1, $2, $3)")
+                .bind(&user_id)
+                .bind(format!("streamtest-{user_id}"))
+                .bind(plan)
+                .execute(&state.db)
+                .await
+                .expect("could not create the test user");
+
+            sqlx::query("INSERT INTO api_keys (id, user_id, token_hash, token_prefix) VALUES ($1, $2, $3, $4)")
+                .bind(Uuid::new_v4().to_string())
+                .bind(&user_id)
+                .bind(token::hash_api_token(&api_token))
+                .bind(&api_token[..12])
+                .execute(&state.db)
+                .await
+                .expect("could not create the test api key");
+
+            Self {
+                state,
+                user_id,
+                api_token,
+            }
+        }
+
+        async fn set_encrypt_uploads(&self, on: bool) {
+            sqlx::query("UPDATE user_settings SET encrypt_uploads = $1 WHERE user_id = $2")
+                .bind(on)
+                .bind(&self.user_id)
+                .execute(&self.state.db)
+                .await
+                .unwrap();
+        }
+
+        async fn upload(&self, body: Vec<u8>) -> (StatusCode, serde_json::Value) {
+            let app =
+                test::init_service(App::new().app_data(self.state.clone()).service(upload_file))
+                    .await;
+
+            let req = test::TestRequest::post()
+                .uri("/")
+                .insert_header(("authorization", format!("Bearer {}", self.api_token)))
+                .insert_header((
+                    "content-type",
+                    format!("multipart/form-data; boundary={BOUNDARY}"),
+                ))
+                .set_payload(body)
+                .to_request();
+
+            let resp = test::call_service(&app, req).await;
+            let status = resp.status();
+            (status, test::read_body_json(resp).await)
+        }
+
+        async fn file_count(&self) -> i64 {
+            sqlx::query_as::<_, (i64,)>("SELECT count(*) FROM files WHERE user_id = $1")
+                .bind(&self.user_id)
+                .fetch_one(&self.state.db)
+                .await
+                .unwrap()
+                .0
+        }
+
+        async fn fetch_and_decrypt(&self, user_key: Option<&str>) -> Vec<u8> {
+            let row = sqlx::query_as::<_, File>(
+                "SELECT * FROM files WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(&self.user_id)
+            .fetch_one(&self.state.db)
+            .await
+            .expect("no file row was written");
+
+            let object = self
+                .state
+                .storage
+                .get(&row.original_name, None)
+                .await
+                .unwrap();
+            let mut cipher = Vec::new();
+            let mut body = object.stream;
+            while let Some(chunk) = body.next().await {
+                cipher.extend_from_slice(&chunk.unwrap());
+            }
+
+            let kek = self
+                .state
+                .keyring
+                .get(row.encryption_key_version.unwrap())
+                .unwrap();
+            let dek = crypto::unwrap_key(
+                kek,
+                &iv(row.dek_iv.as_deref().unwrap()),
+                row.wrapped_dek.as_deref().unwrap(),
+            )
+            .unwrap();
+
+            let mut keystreams =
+                vec![
+                    crypto::Keystream::at(&dek, &iv(row.encryption_iv.as_deref().unwrap()), 0)
+                        .unwrap(),
+                ];
+            if let (Some(key), Some(key_iv)) = (user_key, row.user_key_iv.as_deref()) {
+                let key = crypto::parse_key(key).unwrap();
+                keystreams.push(crypto::Keystream::at(&key, &iv(key_iv), 0).unwrap());
+            }
+            crypto::Layers::new(keystreams).apply(&mut cipher);
+            cipher
+        }
+
+        async fn cleanup(&self) {
+            let keys = sqlx::query_as::<_, (String,)>(
+                "SELECT original_name FROM files WHERE user_id = $1",
+            )
+            .bind(&self.user_id)
+            .fetch_all(&self.state.db)
+            .await
+            .unwrap();
+            for (key,) in keys {
+                let _ = self.state.storage.delete(&key).await;
+            }
+            sqlx::query("DELETE FROM users WHERE id = $1")
+                .bind(&self.user_id)
+                .execute(&self.state.db)
+                .await
+                .unwrap();
+        }
+    }
+
+    fn iv(bytes: &[u8]) -> [u8; crypto::IV_LEN] {
+        bytes.try_into().unwrap()
+    }
+
+    fn pattern(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    fn real_png(side: u32) -> Vec<u8> {
+        let mut seed = 0x9E37_79B9u32;
+        let mut raw = Vec::with_capacity((side * side * 3) as usize);
+        for _ in 0..side * side * 3 {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            raw.push((seed >> 16) as u8);
+        }
+
+        let img = image::RgbImage::from_raw(side, side, raw).unwrap();
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        bytes
+    }
+
+    fn multipart_body(file: &[u8], password: Option<&str>) -> Vec<u8> {
+        let mut body = Vec::with_capacity(file.len() + 512);
+        if let Some(password) = password {
+            body.extend_from_slice(format!(
+                "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"password\"\r\n\r\n{password}\r\n"
+            ).as_bytes());
+        }
+        body.extend_from_slice(format!(
+            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"blob.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+        ).as_bytes());
+        body.extend_from_slice(file);
+        body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+        body
+    }
+
+    fn query_param(url: &str, name: &str) -> Option<String> {
+        url.split_once('?')?
+            .1
+            .split('&')
+            .find_map(|pair| pair.strip_prefix(&format!("{name}=")))
+            .map(str::to_owned)
+    }
+
+    #[actix_web::test]
+    #[ignore = "needs postgres and a live s3 endpoint"]
+    async fn a_body_larger_than_one_part_round_trips_byte_for_byte() {
+        let fixture = Fixture::new("pro").await;
+        fixture.set_encrypt_uploads(false).await;
+
+        let file = pattern(BODY);
+        let (status, json) = fixture.upload(multipart_body(&file, None)).await;
+        assert_eq!(status, StatusCode::CREATED, "response was {json}");
+
+        let recovered = fixture.fetch_and_decrypt(None).await;
+        assert_eq!(recovered.len(), file.len(), "size changed in transit");
+        assert_eq!(recovered, file, "bytes changed in transit");
+
+        let size = sqlx::query_as::<_, (i64,)>("SELECT size_bytes FROM files WHERE user_id = $1")
+            .bind(&fixture.user_id)
+            .fetch_one(&fixture.state.db)
+            .await
+            .unwrap();
+        assert_eq!(size.0 as usize, BODY, "recorded size is wrong");
+
+        fixture.cleanup().await;
+    }
+
+    #[actix_web::test]
+    #[ignore = "needs postgres and a live s3 endpoint"]
+    async fn a_user_encrypted_body_round_trips_byte_for_byte() {
+        let fixture = Fixture::new("pro").await;
+        fixture.set_encrypt_uploads(true).await;
+
+        let file = pattern(BODY);
+        let (status, json) = fixture.upload(multipart_body(&file, None)).await;
+        assert_eq!(status, StatusCode::CREATED, "response was {json}");
+
+        let url = json["url"].as_str().expect("no url in the response");
+        let key = query_param(url, "key").expect("no user key in the url");
+
+        assert_eq!(fixture.fetch_and_decrypt(Some(&key)).await, file);
+
+        fixture.cleanup().await;
+    }
+
+    #[actix_web::test]
+    #[ignore = "needs postgres and a live s3 endpoint"]
+    async fn an_image_larger_than_the_sniff_window_is_still_detected() {
+        let fixture = Fixture::new("pro").await;
+        fixture.set_encrypt_uploads(false).await;
+
+        let file = real_png(256);
+        assert!(
+            file.len() > SNIFF_BYTES,
+            "the fixture must outgrow the sniff window to be meaningful"
+        );
+
+        let (status, json) = fixture.upload(multipart_body(&file, None)).await;
+        assert_eq!(status, StatusCode::CREATED, "response was {json}");
+
+        let content_type =
+            sqlx::query_as::<_, (String,)>("SELECT content_type FROM files WHERE user_id = $1")
+                .bind(&fixture.user_id)
+                .fetch_one(&fixture.state.db)
+                .await
+                .unwrap();
+        assert_eq!(content_type.0, "image/png", "the image was not recognised");
+
+        let url = json["url"].as_str().unwrap();
+        assert!(url.ends_with(".png"), "wrong extension in {url}");
+
+        assert_eq!(
+            fixture.fetch_and_decrypt(None).await,
+            file,
+            "the sniffed prefix did not reach the object intact"
+        );
+
+        fixture.cleanup().await;
+    }
+
+    #[actix_web::test]
+    #[ignore = "needs postgres and a live s3 endpoint"]
+    async fn a_spoofed_image_signature_falls_back_and_still_stores() {
+        let fixture = Fixture::new("pro").await;
+        fixture.set_encrypt_uploads(false).await;
+
+        let mut file = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        file.extend_from_slice(&pattern(BODY));
+
+        let (status, json) = fixture.upload(multipart_body(&file, None)).await;
+        assert_eq!(status, StatusCode::CREATED, "response was {json}");
+
+        let content_type =
+            sqlx::query_as::<_, (String,)>("SELECT content_type FROM files WHERE user_id = $1")
+                .bind(&fixture.user_id)
+                .fetch_one(&fixture.state.db)
+                .await
+                .unwrap();
+        assert_eq!(
+            content_type.0, "application/octet-stream",
+            "a spoofed signature was trusted"
+        );
+        assert_eq!(fixture.fetch_and_decrypt(None).await, file);
+
+        fixture.cleanup().await;
+    }
+
+    #[actix_web::test]
+    #[ignore = "needs postgres and a live s3 endpoint"]
+    async fn a_password_field_before_the_file_still_uploads() {
+        let fixture = Fixture::new("pro").await;
+        fixture.set_encrypt_uploads(false).await;
+
+        let file = pattern(9 * 1024 * 1024);
+        let (status, json) = fixture
+            .upload(multipart_body(&file, Some("hunter22!")))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "response was {json}");
+
+        let hash = sqlx::query_as::<_, (Option<String>,)>(
+            "SELECT password_hash FROM files WHERE user_id = $1",
+        )
+        .bind(&fixture.user_id)
+        .fetch_one(&fixture.state.db)
+        .await
+        .unwrap();
+        assert!(hash.0.is_some(), "the password was not recorded");
+        assert_eq!(fixture.fetch_and_decrypt(None).await, file);
+
+        fixture.cleanup().await;
+    }
+
+    #[actix_web::test]
+    #[ignore = "needs postgres and a live s3 endpoint"]
+    async fn an_oversized_body_is_rejected_and_stores_nothing() {
+        let fixture = Fixture::new("free").await;
+
+        let file = pattern(90 * 1024 * 1024);
+        let (status, _) = fixture.upload(multipart_body(&file, None)).await;
+        assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(
+            fixture.file_count().await,
+            0,
+            "a rejected upload wrote a row"
+        );
+
+        fixture.cleanup().await;
+    }
 }

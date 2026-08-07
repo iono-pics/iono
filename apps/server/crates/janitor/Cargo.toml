@@ -20,6 +20,11 @@ serde_json.workspace = true
 secrecy.workspace = true
 subtle.workspace = true
 futures-util.workspace = true
+bytes.workspace = true
 
 tracing.workspace = true
 tracing-actix-web.workspace = true
+
+[dev-dependencies]
+dotenvy.workspace = true
+uuid.workspace = true

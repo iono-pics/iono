@@ -1,5 +1,6 @@
 use actix_web::{post, web, HttpResponse};
 use actix_web_httpauth::extractors::bearer::BearerAuth;
+use bytes::Bytes;
 use futures_util::StreamExt;
 use iono_core::{crypto, AppError};
 use secrecy::ExposeSecret;
@@ -49,7 +50,8 @@ pub async fn encrypt_backfill(state: web::Data<AppState>, auth: BearerAuth) -> H
     }
 
     let state = state.into_inner();
-    state.bg.clone().spawn(async move {
+    let slot = state.clone();
+    let task = state.bg.clone().spawn(async move {
         let _guard = RunGuard;
         let start = Instant::now();
         match run_backfill(&state).await {
@@ -64,6 +66,7 @@ pub async fn encrypt_backfill(state: web::Data<AppState>, auth: BearerAuth) -> H
             Err(e) => tracing::error!(error = %e, "encryption backfill aborted"),
         }
     });
+    *slot.backfill_task.lock().unwrap() = Some(task);
 
     HttpResponse::Accepted().json(serde_json::json!({ "status": "backfill started" }))
 }
@@ -201,34 +204,44 @@ async fn process(state: &AppState, row: &PendingRow) -> Result<Outcome, AppError
             file_id = %row.id,
             size_bytes = row.size_bytes,
             max,
-            "object too large to convert in memory, skipping"
+            "object above the backfill size limit, skipping"
         );
         return Ok(Outcome::Skipped);
     }
 
-    let object = state.core.storage.get(&row.original_name, None).await?;
-    let mut bytes = Vec::with_capacity(row.size_bytes.max(0) as usize);
-    let mut stream = object.stream;
-    while let Some(chunk) = stream.next().await {
-        bytes.extend_from_slice(&chunk.map_err(AppError::from)?);
-    }
-
+    let mut keystreams = Vec::new();
     if let (Some(iv), Some(version)) = (row.encryption_iv.as_deref(), row.encryption_key_version) {
-        crypto::encrypt_buffer(keyring.get(version)?, &iv_array(iv)?, &mut bytes)?;
+        keystreams.push(crypto::Keystream::at(
+            keyring.get(version)?,
+            &iv_array(iv)?,
+            0,
+        )?);
     }
 
     let dek = crypto::random_key();
     let encryption_iv = crypto::random_iv();
-    crypto::encrypt_buffer(&dek, &encryption_iv, &mut bytes)?;
+    keystreams.push(crypto::Keystream::at(&dek, &encryption_iv, 0)?);
+    let mut layers = crypto::Layers::new(keystreams);
 
-    let dek_iv = crypto::random_iv();
-    let wrapped_dek = crypto::wrap_key(keyring.current(), &dek_iv, &dek)?;
+    let object = state.core.storage.get(&row.original_name, None).await?;
+    let body = object.stream.map(move |chunk| {
+        let mut buf = chunk.map_err(AppError::from)?.to_vec();
+        layers.apply(&mut buf);
+        Ok(Bytes::from(buf))
+    });
 
     state
         .core
         .storage
-        .save(&row.original_name, &bytes, "application/octet-stream")
+        .save_stream(
+            &row.original_name,
+            "application/octet-stream",
+            Box::pin(body),
+        )
         .await?;
+
+    let dek_iv = crypto::random_iv();
+    let wrapped_dek = crypto::wrap_key(keyring.current(), &dek_iv, &dek)?;
 
     Ok(Outcome::Converted {
         encryption_iv,
@@ -240,4 +253,160 @@ async fn process(state: &AppState, row: &PendingRow) -> Result<Outcome, AppError
 fn iv_array(iv: &[u8]) -> Result<[u8; crypto::IV_LEN], AppError> {
     iv.try_into()
         .map_err(|_| AppError::internal("stored encryption iv is malformed"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iono_core::state::CoreState;
+    use iono_core::Config;
+    use std::sync::Mutex;
+    use uuid::Uuid;
+
+    const BIG: usize = 20 * 1024 * 1024;
+
+    async fn state() -> AppState {
+        dotenvy::from_path("../../../.env").ok();
+        let config = Config::from_env();
+        AppState {
+            core: CoreState::build(&config).await,
+            maintenance_token: secrecy::SecretString::from("test"),
+            bg: tokio::runtime::Handle::current(),
+            sweep_task: Mutex::new(None),
+            backfill_task: Mutex::new(None),
+        }
+    }
+
+    fn pattern(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    async fn read_object(state: &AppState, key: &str) -> Vec<u8> {
+        let object = state.core.storage.get(key, None).await.unwrap();
+        let mut out = Vec::new();
+        let mut body = object.stream;
+        while let Some(chunk) = body.next().await {
+            out.extend_from_slice(&chunk.unwrap());
+        }
+        out
+    }
+
+    fn row(
+        key: &str,
+        size: usize,
+        encryption_iv: Option<Vec<u8>>,
+        version: Option<i16>,
+    ) -> PendingRow {
+        PendingRow {
+            id: Uuid::new_v4().to_string(),
+            original_name: key.to_owned(),
+            size_bytes: size as i64,
+            encryption_key_version: version,
+            encryption_iv,
+            wrapped_dek: None,
+            dek_iv: None,
+        }
+    }
+
+    fn decrypt(state: &AppState, cipher: &mut [u8], outcome: &Outcome) {
+        let Outcome::Converted {
+            encryption_iv,
+            wrapped_dek,
+            dek_iv,
+        } = outcome
+        else {
+            panic!("expected a conversion, got a different outcome");
+        };
+        let dek =
+            crypto::unwrap_key(state.core.keyring.current(), dek_iv, &wrapped_dek[..]).unwrap();
+        crypto::Layers::new(vec![crypto::Keystream::at(&dek, encryption_iv, 0).unwrap()])
+            .apply(cipher);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs postgres and a live s3 endpoint"]
+    async fn a_plaintext_object_larger_than_a_part_converts_byte_for_byte() {
+        let state = state().await;
+        let key = format!("backfill-plain-{}", Uuid::new_v4());
+        let plain = pattern(BIG);
+
+        state
+            .core
+            .storage
+            .save(&key, &plain, "application/octet-stream")
+            .await
+            .unwrap();
+
+        let outcome = process(&state, &row(&key, plain.len(), None, None))
+            .await
+            .expect("process failed");
+
+        let mut stored = read_object(&state, &key).await;
+        assert_ne!(stored, plain, "the object was left in the clear");
+        decrypt(&state, &mut stored, &outcome);
+        assert_eq!(stored, plain, "conversion did not round trip");
+
+        state.core.storage.delete(&key).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs postgres and a live s3 endpoint"]
+    async fn an_object_under_a_legacy_key_is_re_encrypted_byte_for_byte() {
+        let state = state().await;
+        let key = format!("backfill-legacy-{}", Uuid::new_v4());
+        let plain = pattern(BIG);
+
+        let version = state.core.keyring.current_version();
+        let legacy_iv = crypto::random_iv();
+        let mut legacy = plain.clone();
+        crypto::encrypt_buffer(
+            state.core.keyring.get(version).unwrap(),
+            &legacy_iv,
+            &mut legacy,
+        )
+        .unwrap();
+
+        state
+            .core
+            .storage
+            .save(&key, &legacy, "application/octet-stream")
+            .await
+            .unwrap();
+
+        let outcome = process(
+            &state,
+            &row(&key, legacy.len(), Some(legacy_iv.to_vec()), Some(version)),
+        )
+        .await
+        .expect("process failed");
+
+        let mut stored = read_object(&state, &key).await;
+        assert_ne!(stored, plain);
+        assert_ne!(stored, legacy, "the object was not re-encrypted");
+        decrypt(&state, &mut stored, &outcome);
+        assert_eq!(stored, plain, "the legacy layer was not peeled off");
+
+        state.core.storage.delete(&key).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs postgres and a live s3 endpoint"]
+    async fn an_empty_object_converts_without_error() {
+        let state = state().await;
+        let key = format!("backfill-empty-{}", Uuid::new_v4());
+
+        state
+            .core
+            .storage
+            .save(&key, &[], "application/octet-stream")
+            .await
+            .unwrap();
+
+        process(&state, &row(&key, 0, None, None))
+            .await
+            .expect("process failed");
+        assert!(read_object(&state, &key).await.is_empty());
+
+        state.core.storage.delete(&key).await.unwrap();
+    }
 }

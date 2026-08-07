@@ -1,5 +1,6 @@
 use actix_web::{web, App, HttpServer};
 use std::sync::Mutex;
+use tokio::task::JoinHandle;
 use tracing_actix_web::TracingLogger;
 
 use iono_core::state::CoreState;
@@ -38,6 +39,7 @@ async fn main() -> std::io::Result<()> {
         maintenance_token,
         bg: bg.handle().clone(),
         sweep_task: Mutex::new(None),
+        backfill_task: Mutex::new(None),
     });
     let state_after = state.clone();
 
@@ -52,14 +54,22 @@ async fn main() -> std::io::Result<()> {
     .run()
     .await?;
 
-    let task = state_after.sweep_task.lock().unwrap().take();
-    if let Some(task) = task {
-        if !task.is_finished() {
-            tracing::info!("waiting for in-flight sweep to finish");
-            let _ = task.await;
-        }
-    }
+    drain(&state_after.sweep_task, "sweep").await;
+    drain(&state_after.backfill_task, "encryption backfill").await;
     bg.shutdown_background();
 
     Ok(())
+}
+
+async fn drain(slot: &Mutex<Option<JoinHandle<()>>>, name: &str) {
+    let task = slot.lock().unwrap().take();
+    let Some(task) = task else { return };
+    if task.is_finished() {
+        return;
+    }
+
+    tracing::info!(task = name, "waiting for in flight task to finish");
+    if let Err(e) = task.await {
+        tracing::error!(task = name, error = %e, "task did not finish cleanly");
+    }
 }
