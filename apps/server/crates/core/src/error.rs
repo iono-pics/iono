@@ -26,6 +26,9 @@ pub enum AppError {
     #[error("gone: {0}")]
     Gone(String),
 
+    #[error("too many attempts, try again later")]
+    RateLimited,
+
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 

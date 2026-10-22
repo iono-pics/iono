@@ -38,7 +38,7 @@ pub async fn confirm_totp(
         return Err(AppError::BadRequest("totp setup has not been started".into()).into());
     };
 
-    if !totp::verify_totp_code(&secret, &body.code)? {
+    if !totp::accept_code(&state.db, &state.keyring, &user.0.id, &secret, &body.code).await? {
         return Err(AppError::Unauthorized.into());
     }
 

@@ -7,12 +7,25 @@
 	"observability": {
     	"enabled": true,
   	},
+	// one image, three pools. *_INSTANCES below must stay within max_instances
 	"containers": [
 		{
 			"class_name": "ServerContainer",
 			"image": "../Dockerfile",
 			"instance_type": "basic",
-			"max_instances": 10
+			"max_instances": 4
+		},
+		{
+			"class_name": "IngestContainer",
+			"image": "../Dockerfile",
+			"instance_type": "basic",
+			"max_instances": 6
+		},
+		{
+			"class_name": "ViewerContainer",
+			"image": "../Dockerfile",
+			"instance_type": "basic",
+			"max_instances": 8
 		}
 	],
 	"vars": {
@@ -20,7 +33,17 @@
 		"INGEST_HOST": "up.iono.pics",
 		"PUBLIC_INGEST_URL": "https://up.iono.pics",
 		"STRIPE_PORTAL_RETURN_URL": "https://iono.pics/settings",
-		"RUST_LOG": "info"
+		"WEBAUTHN_RP_ID": "iono.pics",
+		"WEBAUTHN_RP_ORIGIN": "https://iono.pics",
+		"DISCORD_REDIRECT_URI": "https://api.iono.pics/auth/discord/callback",
+		"DISCORD_SUCCESS_REDIRECT_URL": "https://iono.pics/auth/complete",
+		"RUST_LOG": "info",
+		// per process. 9 processes at the instance counts below, keep the
+		// total under what the database allows
+		"DATABASE_MAX_CONNECTIONS": "5",
+		"CORE_INSTANCES": "2",
+		"INGEST_INSTANCES": "2",
+		"VIEWER_INSTANCES": "3"
 	},
 	"routes": [
 		{ "pattern": "api.iono.pics", "custom_domain": true },
@@ -35,6 +58,14 @@
 			{
 				"class_name": "ServerContainer",
 				"name": "SERVER_CONTAINER"
+			},
+			{
+				"class_name": "IngestContainer",
+				"name": "INGEST_CONTAINER"
+			},
+			{
+				"class_name": "ViewerContainer",
+				"name": "VIEWER_CONTAINER"
 			}
 		]
 	},
@@ -42,6 +73,10 @@
 		{
 			"new_sqlite_classes": ["ServerContainer"],
 			"tag": "v1"
+		},
+		{
+			"new_sqlite_classes": ["IngestContainer", "ViewerContainer"],
+			"tag": "v2"
 		}
 	]
 }

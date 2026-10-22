@@ -22,8 +22,11 @@ pub async fn setup_totp(state: web::Data<AppState>, user: JwtUser) -> ApiResult<
     let label = user.0.email.as_deref().unwrap_or(&user.0.username);
     let setup = totp::generate_totp_setup(label)?;
 
-    sqlx::query("UPDATE users SET totp_secret = $1 WHERE id = $2")
-        .bind(&setup.secret_base32)
+    // the plaintext goes back to the client once for the qr code, the
+    // database only ever holds it sealed
+    let sealed = totp::seal_secret(&state.keyring, &user.0.id, &setup.secret_base32)?;
+    sqlx::query("UPDATE users SET totp_secret = $1, totp_last_step = NULL WHERE id = $2")
+        .bind(&sealed)
         .bind(&user.0.id)
         .execute(&state.db)
         .await

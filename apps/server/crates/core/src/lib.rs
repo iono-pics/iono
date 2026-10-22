@@ -5,6 +5,7 @@ pub mod config;
 pub mod content_type;
 pub mod crypto;
 pub mod db;
+pub mod deletion;
 pub mod embed_vars;
 pub mod entities;
 pub mod error;

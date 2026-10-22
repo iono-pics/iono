@@ -1,5 +1,6 @@
 use actix_web::{delete, web, HttpResponse};
 use iono_core::{
+    deletion::{self, Pending},
     web::{ApiResult, OptionExt},
     AppError,
 };
@@ -24,24 +25,21 @@ pub async fn delete_file(
 ) -> ApiResult<HttpResponse> {
     let file_id = path.into_inner();
 
+    let mut tx = state.db.begin().await.map_err(AppError::from)?;
+
     let s3_key = sqlx::query_scalar::<_, String>(
         "DELETE FROM files WHERE id = $1 AND user_id = $2 RETURNING original_name",
     )
     .bind(&file_id)
     .bind(&user.0.id)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(AppError::from)?
     .ok_or_not_found()?;
 
-    if let Err(e) = state.storage.delete(&s3_key).await {
-        tracing::warn!(
-            file_id = %file_id,
-            s3_key = %s3_key,
-            error = %e,
-            "failed to delete file object from storage, row already removed",
-        );
-    }
+    let queued = deletion::enqueue(&mut *tx, &[Pending::file(&file_id, s3_key)]).await?;
+    tx.commit().await.map_err(AppError::from)?;
+    state.process_deletions(queued);
 
     Ok(HttpResponse::NoContent().finish())
 }

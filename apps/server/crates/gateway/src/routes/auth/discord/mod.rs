@@ -2,11 +2,11 @@ pub mod callback;
 pub mod login;
 pub mod start;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{Duration, Utc};
 use iono_core::{
     auth::token,
     entities::User,
-    oauth::{fetch_discord_user, DiscordUser, OAuthClient, OAuthError, Tokens},
+    oauth::{fetch_discord_user, DiscordUser, OAuthClient, OAuthError},
     AppError,
 };
 use rand::RngExt;
@@ -51,7 +51,7 @@ pub(crate) async fn consume_flow_and_fetch(
     state: &AppState,
     csrf_token: &str,
     code: &str,
-) -> Result<(Tokens, DiscordUser, Option<String>), AppError> {
+) -> Result<(DiscordUser, Option<String>), AppError> {
     require_configured(&state.discord)?;
 
     let row: Option<(String, Option<String>)> = sqlx::query_as(
@@ -78,7 +78,8 @@ pub(crate) async fn consume_flow_and_fetch(
         .await
         .map_err(map_oauth_error)?;
 
-    Ok((tokens, discord_user, link_user_id))
+    // the tokens are dropped here, the discord user is all we wanted
+    Ok((discord_user, link_user_id))
 }
 
 /// The caller mints the tokens, so both discord entry points go through the
@@ -95,11 +96,8 @@ pub(crate) enum LoginOutcome {
 pub(crate) async fn login_or_signup(
     db: &PgPool,
     jwt_secret: &str,
-    tokens: &Tokens,
     discord_user: &DiscordUser,
 ) -> Result<LoginOutcome, AppError> {
-    let expires_at = tokens.expires_in.map(|s| Utc::now() + Duration::seconds(s));
-
     let existing: Option<(String,)> = sqlx::query_as(
         "SELECT user_id FROM oauth_accounts WHERE provider = $1 AND provider_user_id = $2",
     )
@@ -121,24 +119,6 @@ pub(crate) async fn login_or_signup(
             return Err(AppError::Unauthorized);
         }
 
-        sqlx::query(
-            r#"
-            UPDATE oauth_accounts SET
-                access_token  = $1,
-                refresh_token = $2,
-                expires_at    = $3
-            WHERE provider = $4 AND provider_user_id = $5
-            "#,
-        )
-        .bind(&tokens.access_token)
-        .bind(&tokens.refresh_token)
-        .bind(expires_at)
-        .bind(PROVIDER)
-        .bind(&discord_user.id)
-        .execute(db)
-        .await
-        .map_err(AppError::from)?;
-
         if let Some(challenge) = mfa_challenge(db, jwt_secret, &user).await? {
             return Ok(LoginOutcome::MfaRequired(challenge));
         }
@@ -151,15 +131,7 @@ pub(crate) async fn login_or_signup(
     }
 
     let user = create_user_from_discord(db, discord_user).await?;
-    insert_oauth_account(
-        db,
-        &user.id,
-        &discord_user.id,
-        &tokens.access_token,
-        tokens.refresh_token.as_deref(),
-        expires_at,
-    )
-    .await?;
+    insert_oauth_account(db, &user.id, &discord_user.id).await?;
 
     Ok(LoginOutcome::SignedIn {
         user_id: user.id,
@@ -171,7 +143,6 @@ pub(crate) async fn login_or_signup(
 pub(crate) async fn link_to_user(
     state: &AppState,
     user_id: &str,
-    tokens: &Tokens,
     discord_user: &DiscordUser,
 ) -> Result<(), AppError> {
     let existing_owner: Option<(String,)> = sqlx::query_as(
@@ -192,28 +163,19 @@ pub(crate) async fn link_to_user(
         ));
     }
 
-    let expires_at = tokens.expires_in.map(|s| Utc::now() + Duration::seconds(s));
-
-    insert_oauth_account(
-        &state.db,
-        user_id,
-        &discord_user.id,
-        &tokens.access_token,
-        tokens.refresh_token.as_deref(),
-        expires_at,
-    )
-    .await
-    .map_err(|e| match e {
-        AppError::Database(db_err) => match &db_err {
-            sqlx::Error::Database(inner)
-                if inner.kind() == sqlx::error::ErrorKind::UniqueViolation =>
-            {
-                AppError::Conflict("your account already has a linked discord".into())
-            }
-            _ => AppError::Database(db_err),
-        },
-        other => other,
-    })
+    insert_oauth_account(&state.db, user_id, &discord_user.id)
+        .await
+        .map_err(|e| match e {
+            AppError::Database(db_err) => match &db_err {
+                sqlx::Error::Database(inner)
+                    if inner.kind() == sqlx::error::ErrorKind::UniqueViolation =>
+                {
+                    AppError::Conflict("your account already has a linked discord".into())
+                }
+                _ => AppError::Database(db_err),
+            },
+            other => other,
+        })
 }
 
 pub(crate) async fn store_flow_state(
@@ -241,29 +203,24 @@ pub(crate) async fn store_flow_state(
     Ok(())
 }
 
+// discord's tokens are only needed to fetch the user during the login that
+// got them, so they are not kept
 async fn insert_oauth_account(
     db: &PgPool,
     user_id: &str,
     provider_user_id: &str,
-    access_token: &str,
-    refresh_token: Option<&str>,
-    expires_at: Option<DateTime<Utc>>,
 ) -> Result<(), AppError> {
     let id = Uuid::new_v4().to_string();
     sqlx::query(
         r#"
-        INSERT INTO oauth_accounts
-            (id, user_id, provider, provider_user_id, access_token, refresh_token, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO oauth_accounts (id, user_id, provider, provider_user_id)
+        VALUES ($1, $2, $3, $4)
         "#,
     )
     .bind(&id)
     .bind(user_id)
     .bind(PROVIDER)
     .bind(provider_user_id)
-    .bind(access_token)
-    .bind(refresh_token)
-    .bind(expires_at)
     .execute(db)
     .await
     .map_err(AppError::from)?;
@@ -374,14 +331,6 @@ mod tests {
 
     const SECRET: &str = "test-secret";
 
-    fn tokens() -> Tokens {
-        Tokens {
-            access_token: "discord-access".into(),
-            refresh_token: None,
-            expires_in: None,
-        }
-    }
-
     fn discord_user() -> DiscordUser {
         DiscordUser {
             id: "discord-1".into(),
@@ -421,9 +370,7 @@ mod tests {
     async fn linked_account_with_totp_is_challenged(db: PgPool) {
         seed_linked_user(&db, true).await;
 
-        let outcome = login_or_signup(&db, SECRET, &tokens(), &discord_user())
-            .await
-            .unwrap();
+        let outcome = login_or_signup(&db, SECRET, &discord_user()).await.unwrap();
 
         match outcome {
             LoginOutcome::MfaRequired(challenge) => assert_eq!(challenge.methods(), ["totp"]),
@@ -435,9 +382,7 @@ mod tests {
     async fn linked_account_without_mfa_signs_in(db: PgPool) {
         seed_linked_user(&db, false).await;
 
-        let outcome = login_or_signup(&db, SECRET, &tokens(), &discord_user())
-            .await
-            .unwrap();
+        let outcome = login_or_signup(&db, SECRET, &discord_user()).await.unwrap();
 
         match outcome {
             LoginOutcome::SignedIn { is_new_user, .. } => assert!(!is_new_user),
@@ -447,9 +392,7 @@ mod tests {
 
     #[sqlx::test(migrations = "../../migrations")]
     async fn unknown_discord_account_creates_a_user(db: PgPool) {
-        let outcome = login_or_signup(&db, SECRET, &tokens(), &discord_user())
-            .await
-            .unwrap();
+        let outcome = login_or_signup(&db, SECRET, &discord_user()).await.unwrap();
 
         match outcome {
             LoginOutcome::SignedIn { is_new_user, .. } => assert!(is_new_user),
@@ -465,7 +408,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = login_or_signup(&db, SECRET, &tokens(), &discord_user()).await;
+        let result = login_or_signup(&db, SECRET, &discord_user()).await;
 
         assert!(matches!(result, Err(AppError::Unauthorized)));
     }

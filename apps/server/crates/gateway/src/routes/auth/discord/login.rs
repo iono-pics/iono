@@ -46,7 +46,7 @@ pub async fn discord_login(
 ) -> ApiResult<HttpResponse> {
     let body = body.into_inner();
 
-    let (tokens, discord_user, link_user_id_from_flow) =
+    let (discord_user, link_user_id_from_flow) =
         consume_flow_and_fetch(&state, &body.state, &body.code).await?;
 
     let bearer_user_id = if let Some(bearer) = extract_bearer(&req) {
@@ -60,14 +60,13 @@ pub async fn discord_login(
     let link_target = bearer_user_id.or(link_user_id_from_flow);
 
     if let Some(user_id) = link_target {
-        link_to_user(&state, &user_id, &tokens, &discord_user).await?;
+        link_to_user(&state, &user_id, &discord_user).await?;
         return Ok(HttpResponse::NoContent().finish());
     }
 
     let outcome = login_or_signup(
         &state.db,
         state.config.jwt_secret.expose_secret(),
-        &tokens,
         &discord_user,
     )
     .await?;

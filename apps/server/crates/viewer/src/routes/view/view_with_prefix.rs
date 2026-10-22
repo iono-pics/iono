@@ -1,4 +1,4 @@
-use actix_web::{get, web, HttpResponse};
+use actix_web::{get, web, HttpRequest, HttpResponse};
 
 use iono_core::web::ApiResult;
 
@@ -11,11 +11,13 @@ pub async fn view_page_with_prefix(
     state: web::Data<AppState>,
     path: web::Path<(String, String)>,
     query: web::Query<ViewQuery>,
+    req: HttpRequest,
 ) -> ApiResult<HttpResponse> {
     let (prefix, display_name) = path.into_inner();
     let file = fetch_file_with_prefix(&state, &prefix, &display_name).await?;
     view_page_inner(
         &state,
+        &req,
         file,
         &format!("/{prefix}/raw/{display_name}"),
         &query,

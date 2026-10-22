@@ -1,5 +1,8 @@
-use actix_web::{get, http::header, web, HttpResponse};
-use iono_core::{auth::password::verify_password_async, entities::Paste, web::ApiResult, AppError};
+use actix_web::{get, http::header, web, HttpRequest, HttpResponse};
+use iono_core::{
+    auth::password::verify_password_async, entities::Paste, rate_limit::request_ip, web::ApiResult,
+    AppError,
+};
 use maud::{html, PreEscaped, DOCTYPE};
 use serde::Deserialize;
 
@@ -15,9 +18,10 @@ pub async fn view_paste(
     state: web::Data<AppState>,
     path: web::Path<String>,
     query: web::Query<PasteQuery>,
+    req: HttpRequest,
 ) -> ApiResult<HttpResponse> {
     let paste = fetch_paste(&state, &path.into_inner()).await?;
-    render_paste(&state, paste, &query).await
+    render_paste(&state, &req, paste, &query).await
 }
 
 #[get("/p/{prefix}/{key}")]
@@ -25,18 +29,20 @@ pub async fn view_paste_with_prefix(
     state: web::Data<AppState>,
     path: web::Path<(String, String)>,
     query: web::Query<PasteQuery>,
+    req: HttpRequest,
 ) -> ApiResult<HttpResponse> {
     let (prefix, key) = path.into_inner();
     let paste = fetch_paste_with_prefix(&state, &prefix, &key).await?;
-    render_paste(&state, paste, &query).await
+    render_paste(&state, &req, paste, &query).await
 }
 
 async fn render_paste(
     state: &AppState,
+    req: &HttpRequest,
     paste: Paste,
     query: &PasteQuery,
 ) -> ApiResult<HttpResponse> {
-    if !unlock(&paste, query.password.as_deref()).await? {
+    if !unlock(state, req, &paste, query.password.as_deref()).await? {
         return Err(AppError::NotFound.into());
     }
 
@@ -51,7 +57,8 @@ async fn render_paste(
             cache::MaxAges::from_config(&state.config),
             paste.expires_at,
             paste.password_hash.is_some() || paste.e2e_encrypted,
-        ));
+        ))
+        .append_header(cache::paste_tags(&paste.id, &paste.user_id));
 
     Ok(response.body(render_html(&paste, nonce.as_ref())))
 }
@@ -99,15 +106,25 @@ async fn fetch_paste_with_prefix(
     .ok_or(AppError::NotFound)
 }
 
-async fn unlock(paste: &Paste, password: Option<&str>) -> Result<bool, AppError> {
-    let Some(hash) = paste.password_hash.clone() else {
+async fn unlock(
+    state: &AppState,
+    req: &HttpRequest,
+    paste: &Paste,
+    password: Option<&str>,
+) -> Result<bool, AppError> {
+    let Some(stored) = paste.password_hash.as_deref() else {
         return Ok(true);
     };
-    let Some(password) = password.map(str::to_owned) else {
+    let Some(password) = password else {
         return Ok(false);
     };
 
-    verify_password_async(password, hash).await
+    state
+        .unlocker
+        .check(request_ip(req), &paste.id, stored, password, || {
+            verify_password_async(password.to_owned(), stored.to_owned())
+        })
+        .await
 }
 
 fn render_html(paste: &Paste, nonce: Option<&csp::Nonce>) -> String {

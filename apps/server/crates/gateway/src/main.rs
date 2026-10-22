@@ -58,7 +58,10 @@ async fn main() -> std::io::Result<()> {
         .as_ref()
         .map(|k| stripe::Client::new(k.expose_secret()));
 
+    let keyring = config.keyring();
+
     let state = web::Data::new(AppState {
+        keyring,
         db,
         storage,
         cloudflare,

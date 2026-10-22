@@ -58,17 +58,16 @@ pub async fn discord_callback(
         .state
         .ok_or_else(|| AppError::BadRequest("missing state".into()))?;
 
-    let (tokens, discord_user, link_user_id) = consume_flow_and_fetch(&state, &csrf, &code).await?;
+    let (discord_user, link_user_id) = consume_flow_and_fetch(&state, &csrf, &code).await?;
 
     if let Some(user_id) = link_user_id {
-        link_to_user(&state, &user_id, &tokens, &discord_user).await?;
+        link_to_user(&state, &user_id, &discord_user).await?;
         return respond(&state, Outcome::Linked);
     }
 
     let login = login_or_signup(
         &state.db,
         state.config.jwt_secret.expose_secret(),
-        &tokens,
         &discord_user,
     )
     .await?;

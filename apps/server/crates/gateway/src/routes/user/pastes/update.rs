@@ -1,9 +1,10 @@
 use actix_web::{patch, web, HttpResponse};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use iono_core::{
     auth::password::hash_password_async,
+    deletion::{self, Pending},
     entities::Paste,
-    validators,
+    quota, validators,
     web::{ApiResult, OptionExt, Patch},
     AppError,
 };
@@ -61,6 +62,7 @@ pub async fn update_paste(
 
     let paste_id = path.into_inner();
 
+    let mut reservation = None;
     if let Some(new_content) = &body.content {
         let old_len: i64 = sqlx::query_scalar(
             "SELECT octet_length(content)::BIGINT FROM pastes WHERE id = $1 AND user_id = $2",
@@ -74,7 +76,9 @@ pub async fn update_paste(
 
         let delta = new_content.len() as i64 - old_len;
         if delta > 0 {
-            iono_core::quota::check_storage_quota(&state.db, &user.0.id, delta).await?;
+            reservation = Some(
+                quota::reserve_bytes(&state.db, &user.0.id, delta, Duration::minutes(5)).await?,
+            );
         }
     }
 
@@ -87,6 +91,7 @@ pub async fn update_paste(
         None => None,
     };
 
+    let mut tx = state.db.begin().await.map_err(AppError::from)?;
     let updated = sqlx::query_as::<_, Paste>(
         r#"
         UPDATE pastes SET
@@ -110,23 +115,20 @@ pub async fn update_paste(
     .bind(expires_value)
     .bind(&paste_id)
     .bind(&user.0.id)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(AppError::from)?;
 
     let paste = updated.ok_or_not_found()?;
+    if let Some(reservation) = reservation {
+        reservation.settle(&mut *tx).await?;
+    }
+    tx.commit().await.map_err(AppError::from)?;
 
-    let content_or_password_changed = body.content.is_some() || password_provided;
-    if content_or_password_changed && state.cloudflare.is_configured() {
-        if let Some(url) = iono_core::urls::paste_url(&state.db, &user.0.id, &paste.key).await? {
-            let cf = state.cloudflare.clone();
-            let paste_id = paste.id.clone();
-            tokio::spawn(async move {
-                if let Err(e) = cf.purge_urls(vec![url]).await {
-                    tracing::warn!(paste_id = %paste_id, error = %e, "cloudflare purge failed");
-                }
-            });
-        }
+    if body.content.is_some() || password_provided || expires_provided {
+        let queued =
+            deletion::enqueue(&state.db, &[Pending::tag(deletion::paste_tag(&paste.id))]).await?;
+        state.process_deletions(queued);
     }
 
     Ok(HttpResponse::Ok().json(PasteSummary::from(paste)))

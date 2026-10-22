@@ -18,6 +18,12 @@ pub struct SessionContext {
 
 const MAX_USER_AGENT_LEN: usize = 256;
 
+/// a token rotated this recently and shown again was most likely raced by a
+/// second tab or a retried request rather than stolen. it gets a sibling in
+/// the same family instead of ending the session, the trade auth0's reuse
+/// interval makes. anything older still revokes the family
+const REUSE_GRACE_SECONDS: i64 = 30;
+
 impl SessionContext {
     pub fn from_request(req: &HttpRequest) -> Self {
         let user_agent = req
@@ -114,7 +120,11 @@ pub async fn rotate(
     .map_err(AppError::from)?
     .ok_or(AppError::Unauthorized)?;
 
-    if row.rotated_at.is_some() || row.revoked_at.is_some() {
+    let within_grace = row
+        .rotated_at
+        .is_some_and(|rotated| rotated > Utc::now() - Duration::seconds(REUSE_GRACE_SECONDS));
+
+    if row.revoked_at.is_some() || (row.rotated_at.is_some() && !within_grace) {
         sqlx::query(
             "UPDATE refresh_tokens SET revoked_at = now() WHERE family_id = $1 AND revoked_at IS NULL",
         )
@@ -147,7 +157,9 @@ pub async fn rotate(
         return Err(AppError::Unauthorized);
     }
 
-    sqlx::query("UPDATE refresh_tokens SET rotated_at = now() WHERE id = $1")
+    // a sibling issued in the grace window keeps the first rotation time, so
+    // the window never stretches
+    sqlx::query("UPDATE refresh_tokens SET rotated_at = COALESCE(rotated_at, now()) WHERE id = $1")
         .bind(&row.id)
         .execute(&mut *tx)
         .await
@@ -257,11 +269,21 @@ mod tests {
         assert_eq!(families, 1);
     }
 
+    async fn age_rotations(db: &PgPool) {
+        sqlx::query(
+            "UPDATE refresh_tokens SET rotated_at = rotated_at - interval '1 minute' WHERE rotated_at IS NOT NULL",
+        )
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
     #[sqlx::test(migrations = "../../migrations")]
     async fn replaying_a_rotated_token_revokes_the_family(db: PgPool) {
         let user = insert_user(&db).await;
         let first = issue(&db, &user.id, TTL_DAYS, &ctx()).await.unwrap();
         let (_, second) = rotate(&db, &first, TTL_DAYS, &ctx()).await.unwrap();
+        age_rotations(&db).await;
 
         let replay = rotate(&db, &first, TTL_DAYS, &ctx()).await;
         assert!(matches!(replay, Err(AppError::Unauthorized)));
@@ -269,6 +291,31 @@ mod tests {
         // the successor the attacker did not steal is dead too
         let after = rotate(&db, &second, TTL_DAYS, &ctx()).await;
         assert!(matches!(after, Err(AppError::Unauthorized)));
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn two_tabs_refreshing_at_once_both_stay_signed_in(db: PgPool) {
+        let user = insert_user(&db).await;
+        let shared = issue(&db, &user.id, TTL_DAYS, &ctx()).await.unwrap();
+
+        let (_, tab_a) = rotate(&db, &shared, TTL_DAYS, &ctx()).await.unwrap();
+        let (_, tab_b) = rotate(&db, &shared, TTL_DAYS, &ctx())
+            .await
+            .expect("the slower tab must not be treated as a thief");
+
+        assert_ne!(tab_a, tab_b);
+        assert!(rotate(&db, &tab_a, TTL_DAYS, &ctx()).await.is_ok());
+        assert!(rotate(&db, &tab_b, TTL_DAYS, &ctx()).await.is_ok());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_revoked_token_gets_no_grace(db: PgPool) {
+        let user = insert_user(&db).await;
+        let token = issue(&db, &user.id, TTL_DAYS, &ctx()).await.unwrap();
+        rotate(&db, &token, TTL_DAYS, &ctx()).await.unwrap();
+        revoke(&db, &token).await.unwrap();
+
+        assert!(rotate(&db, &token, TTL_DAYS, &ctx()).await.is_err());
     }
 
     #[sqlx::test(migrations = "../../migrations")]

@@ -161,6 +161,7 @@ mod tests {
             encryption_key_version: None,
             wrapped_dek: None,
             dek_iv: None,
+            encryption_format: 1,
             created_at: Utc::now(),
         }
     }

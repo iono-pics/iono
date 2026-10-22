@@ -24,7 +24,7 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(move || {
         let governor = governor.clone();
-        let cors = iono_core::web::cors([Method::POST]);
+        let cors = iono_core::web::cors([Method::POST, Method::PUT, Method::DELETE]);
         App::new()
             .wrap(cors)
             .wrap(TracingLogger::default())

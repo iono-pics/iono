@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing_actix_web::TracingLogger;
 
-use iono_core::state::CoreState;
+use iono_core::{cloudflare::CloudflareClient, state::CoreState};
 
 mod routes;
 mod state;
@@ -34,8 +34,14 @@ async fn main() -> std::io::Result<()> {
 
     tracing::info!("iono-janitor listening on http://{}:{}", host, port);
 
+    let cloudflare = CloudflareClient::new(
+        config.cloudflare_zone_id.clone(),
+        config.cloudflare_api_token.clone(),
+    );
+
     let state = web::Data::new(AppState {
         core,
+        cloudflare,
         maintenance_token,
         bg: bg.handle().clone(),
         sweep_task: Mutex::new(None),

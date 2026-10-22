@@ -36,7 +36,7 @@ pub async fn remove_passkey(
     path: web::Path<String>,
     body: web::Json<ReauthRequest>,
 ) -> ApiResult<HttpResponse> {
-    require_reauth(&user.0, &body).await?;
+    require_reauth(&state, &user.0, &body).await?;
 
     let passkey_id = path.into_inner();
 

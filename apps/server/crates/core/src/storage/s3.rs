@@ -48,45 +48,6 @@ impl S3Storage {
         })
     }
 
-    async fn begin_multipart(&self, key: &str, content_type: &str) -> AppResult<String> {
-        self.client
-            .create_multipart_upload()
-            .bucket(&self.bucket)
-            .key(key)
-            .content_type(content_type)
-            .send()
-            .await
-            .map_err(|e| AppError::internal_from("s3 create_multipart_upload failed", e))?
-            .upload_id()
-            .map(str::to_owned)
-            .ok_or_else(|| AppError::internal("s3 create_multipart_upload returned no upload id"))
-    }
-
-    async fn put_part(
-        &self,
-        key: &str,
-        upload_id: &str,
-        part_number: i32,
-        body: Vec<u8>,
-    ) -> AppResult<CompletedPart> {
-        let out = self
-            .client
-            .upload_part()
-            .bucket(&self.bucket)
-            .key(key)
-            .upload_id(upload_id)
-            .part_number(part_number)
-            .body(ByteStream::from(body))
-            .send()
-            .await
-            .map_err(|e| AppError::internal_from("s3 upload_part failed", e))?;
-
-        Ok(CompletedPart::builder()
-            .part_number(part_number)
-            .set_e_tag(out.e_tag().map(str::to_owned))
-            .build())
-    }
-
     async fn write_parts(
         &self,
         key: &str,
@@ -95,7 +56,7 @@ impl S3Storage {
         upload_id: &mut Option<String>,
     ) -> AppResult<()> {
         let mut buf: Vec<u8> = Vec::with_capacity(PART_SIZE);
-        let mut parts: Vec<CompletedPart> = Vec::new();
+        let mut parts: Vec<(i32, String)> = Vec::new();
 
         while let Some(chunk) = stream.next().await {
             buf.extend_from_slice(&chunk?);
@@ -113,10 +74,9 @@ impl S3Storage {
             };
 
             let body = std::mem::replace(&mut buf, Vec::with_capacity(PART_SIZE));
-            let part = self
-                .put_part(key, &id, parts.len() as i32 + 1, body)
-                .await?;
-            parts.push(part);
+            let number = parts.len() as i32 + 1;
+            let etag = self.put_part(key, &id, number, body).await?;
+            parts.push((number, etag));
         }
 
         let Some(id) = upload_id.clone() else {
@@ -124,25 +84,12 @@ impl S3Storage {
         };
 
         if !buf.is_empty() {
-            let part = self.put_part(key, &id, parts.len() as i32 + 1, buf).await?;
-            parts.push(part);
+            let number = parts.len() as i32 + 1;
+            let etag = self.put_part(key, &id, number, buf).await?;
+            parts.push((number, etag));
         }
 
-        self.client
-            .complete_multipart_upload()
-            .bucket(&self.bucket)
-            .key(key)
-            .upload_id(&id)
-            .multipart_upload(
-                CompletedMultipartUpload::builder()
-                    .set_parts(Some(parts))
-                    .build(),
-            )
-            .send()
-            .await
-            .map_err(|e| AppError::internal_from("s3 complete_multipart_upload failed", e))?;
-
-        Ok(())
+        self.complete_multipart(key, &id, parts).await
     }
 }
 
@@ -173,20 +120,95 @@ impl Storage for S3Storage {
             .await;
 
         if let (Err(_), Some(id)) = (&result, &upload_id) {
-            if let Err(e) = self
-                .client
-                .abort_multipart_upload()
-                .bucket(&self.bucket)
-                .key(key)
-                .upload_id(id)
-                .send()
-                .await
-            {
-                tracing::warn!(key = %key, error = ?e, "could not abort multipart upload");
+            if let Err(e) = self.abort_multipart(key, id).await {
+                tracing::warn!(key = %key, error = %e, "could not abort multipart upload");
             }
         }
 
         result
+    }
+
+    async fn begin_multipart(&self, key: &str, content_type: &str) -> AppResult<String> {
+        self.client
+            .create_multipart_upload()
+            .bucket(&self.bucket)
+            .key(key)
+            .content_type(content_type)
+            .send()
+            .await
+            .map_err(|e| AppError::internal_from("s3 create_multipart_upload failed", e))?
+            .upload_id()
+            .map(str::to_owned)
+            .ok_or_else(|| AppError::internal("s3 create_multipart_upload returned no upload id"))
+    }
+
+    async fn put_part(
+        &self,
+        key: &str,
+        upload_id: &str,
+        part_number: i32,
+        body: Vec<u8>,
+    ) -> AppResult<String> {
+        let out = self
+            .client
+            .upload_part()
+            .bucket(&self.bucket)
+            .key(key)
+            .upload_id(upload_id)
+            .part_number(part_number)
+            .body(ByteStream::from(body))
+            .send()
+            .await
+            .map_err(|e| AppError::internal_from("s3 upload_part failed", e))?;
+
+        out.e_tag()
+            .map(str::to_owned)
+            .ok_or_else(|| AppError::internal("s3 upload_part returned no etag"))
+    }
+
+    async fn complete_multipart(
+        &self,
+        key: &str,
+        upload_id: &str,
+        parts: Vec<(i32, String)>,
+    ) -> AppResult<()> {
+        let parts = parts
+            .into_iter()
+            .map(|(number, etag)| {
+                CompletedPart::builder()
+                    .part_number(number)
+                    .e_tag(etag)
+                    .build()
+            })
+            .collect();
+
+        self.client
+            .complete_multipart_upload()
+            .bucket(&self.bucket)
+            .key(key)
+            .upload_id(upload_id)
+            .multipart_upload(
+                CompletedMultipartUpload::builder()
+                    .set_parts(Some(parts))
+                    .build(),
+            )
+            .send()
+            .await
+            .map_err(|e| AppError::internal_from("s3 complete_multipart_upload failed", e))?;
+
+        Ok(())
+    }
+
+    async fn abort_multipart(&self, key: &str, upload_id: &str) -> AppResult<()> {
+        self.client
+            .abort_multipart_upload()
+            .bucket(&self.bucket)
+            .key(key)
+            .upload_id(upload_id)
+            .send()
+            .await
+            .map_err(|e| AppError::internal_from("s3 abort_multipart_upload failed", e))?;
+        Ok(())
     }
 
     async fn get(&self, key: &str, range: Option<&str>) -> AppResult<StoredObject> {

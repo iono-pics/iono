@@ -2,6 +2,7 @@ use actix_web::{patch, web, HttpResponse};
 use chrono::{DateTime, Utc};
 use iono_core::{
     auth::password::hash_password_async,
+    deletion::{self, Pending},
     entities::File,
     validators,
     web::{ApiResult, MapDbError, OptionExt, Patch},
@@ -138,22 +139,13 @@ pub async fn update_file(
 
     let file = updated.ok_or_not_found()?;
 
-    let renamed_from = old_display_name.filter(|old| old != &file.display_name);
-    if (password_provided || renamed_from.is_some()) && state.cloudflare.is_configured() {
-        let mut display_names: Vec<&str> = vec![&file.display_name];
-        if let Some(old) = renamed_from.as_deref() {
-            display_names.push(old);
-        }
-        let urls = iono_core::urls::file_urls(&state.db, &user.0.id, &display_names).await?;
-        if !urls.is_empty() {
-            let cf = state.cloudflare.clone();
-            let file_id = file.id.clone();
-            tokio::spawn(async move {
-                if let Err(e) = cf.purge_urls(urls).await {
-                    tracing::warn!(file_id = %file_id, error = %e, "cloudflare purge failed");
-                }
-            });
-        }
+    // anything that changes what a cached copy should say, or whether it
+    // should exist, retires every cached copy under every name
+    let renamed = old_display_name.is_some_and(|old| old != file.display_name);
+    if password_provided || expires_provided || renamed {
+        let queued =
+            deletion::enqueue(&state.db, &[Pending::tag(deletion::file_tag(&file.id))]).await?;
+        state.process_deletions(queued);
     }
 
     Ok(HttpResponse::Ok().json(FileSummary::from(file)))

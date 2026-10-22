@@ -1,5 +1,6 @@
 use actix_web::{delete, web, HttpResponse};
 use iono_core::{
+    deletion::{self, Pending},
     web::{ApiResult, OptionExt},
     AppError,
 };
@@ -41,8 +42,8 @@ pub async fn delete_folder(
 
     let mut tx = state.db.begin().await.map_err(AppError::from)?;
 
-    let s3_keys: Vec<String> = if query.delete_files {
-        sqlx::query_scalar::<_, String>(
+    let files: Vec<(String, String)> = if query.delete_files {
+        sqlx::query_as::<_, (String, String)>(
             r#"
             WITH RECURSIVE folder_tree AS (
                 SELECT id FROM folders WHERE id = $1 AND user_id = $2
@@ -54,7 +55,7 @@ pub async fn delete_folder(
             DELETE FROM files
             WHERE user_id = $2
               AND folder_id IN (SELECT id FROM folder_tree)
-            RETURNING original_name
+            RETURNING id, original_name
             "#,
         )
         .bind(&folder_id)
@@ -77,18 +78,14 @@ pub async fn delete_folder(
 
     deleted.ok_or_not_found()?;
 
-    tx.commit().await.map_err(AppError::from)?;
+    let pending: Vec<Pending> = files
+        .iter()
+        .map(|(id, s3_key)| Pending::file(id, s3_key.clone()))
+        .collect();
+    let queued = deletion::enqueue(&mut *tx, &pending).await?;
 
-    if !s3_keys.is_empty() {
-        if let Err(e) = state.storage.delete_many(&s3_keys).await {
-            tracing::warn!(
-                folder_id = %folder_id,
-                error = %e,
-                key_count = s3_keys.len(),
-                "failed to bulk delete file objects from storage, rows already removed",
-            );
-        }
-    }
+    tx.commit().await.map_err(AppError::from)?;
+    state.process_deletions(queued);
 
     Ok(HttpResponse::NoContent().finish())
 }

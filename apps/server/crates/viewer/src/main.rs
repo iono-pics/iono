@@ -11,6 +11,7 @@ mod csp;
 mod embed;
 mod routes;
 mod state;
+mod unlock;
 
 use state::AppState;
 

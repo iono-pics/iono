@@ -5,7 +5,7 @@ pub mod setup;
 
 use iono_core::{
     auth::{
-        password::{hash_password_async, verify_password_async},
+        password::{hash_secret, verify_password_async},
         token, totp,
     },
     entities::User,
@@ -14,6 +14,8 @@ use iono_core::{
 use serde::Deserialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
+
+use crate::state::AppState;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ReauthRequest {
@@ -30,7 +32,11 @@ impl ReauthRequest {
     }
 }
 
-pub(crate) async fn require_reauth(user: &User, req: &ReauthRequest) -> Result<(), AppError> {
+pub(crate) async fn require_reauth(
+    state: &AppState,
+    user: &User,
+    req: &ReauthRequest,
+) -> Result<(), AppError> {
     match (&req.password, &req.totp_code) {
         (Some(password), None) => {
             let Some(hash) = user.password_hash.clone() else {
@@ -45,7 +51,7 @@ pub(crate) async fn require_reauth(user: &User, req: &ReauthRequest) -> Result<(
             let Some(secret) = user.totp_secret.clone() else {
                 return Err(AppError::BadRequest("totp is not enabled".into()));
             };
-            if !totp::verify_totp_code(&secret, code)? {
+            if !totp::accept_code(&state.db, &state.keyring, &user.id, &secret, code).await? {
                 return Err(AppError::Unauthorized);
             }
             Ok(())
@@ -68,7 +74,7 @@ async fn replace_recovery_codes(
     let mut codes = Vec::with_capacity(count);
     for _ in 0..count {
         let code = token::generate_recovery_code();
-        let code_hash = hash_password_async(code.clone()).await?;
+        let code_hash = hash_secret(&code);
 
         sqlx::query("INSERT INTO totp_recovery_codes (id, user_id, code_hash) VALUES ($1, $2, $3)")
             .bind(Uuid::new_v4().to_string())

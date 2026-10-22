@@ -13,4 +13,5 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/target/release/iono-gateway /app/target/release/iono-ingest /app/target/release/iono-viewer /app/target/release/iono-janitor /usr/local/bin/
 EXPOSE 8080 8081 8082 8083
-CMD ["bash", "-c", "iono-gateway & GW=$!; iono-ingest & IN=$!; iono-viewer & VW=$!; iono-janitor & JN=$!; trap 'kill -TERM $GW $IN $VW $JN 2>/dev/null; wait $GW $IN $VW $JN' TERM INT; wait -n"]
+COPY --chmod=755 entrypoint.sh /usr/local/bin/iono-entrypoint
+CMD ["iono-entrypoint"]

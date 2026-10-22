@@ -1,5 +1,6 @@
 use actix_web::{delete, web, HttpResponse};
 use iono_core::{
+    deletion::{self, Pending},
     web::{ApiResult, MapDbError},
     AppError,
 };
@@ -29,7 +30,7 @@ pub async fn delete_account(
     user: JwtUser,
     body: web::Json<ReauthRequest>,
 ) -> ApiResult<HttpResponse> {
-    require_reauth(&user.0, &body).await?;
+    require_reauth(&state, &user.0, &body).await?;
 
     let active_sub_count: i64 = sqlx::query_scalar(
         r#"
@@ -66,6 +67,10 @@ pub async fn delete_account(
     .map_err(MapDbError::new().build())?;
 
     iono_core::auth::refresh::revoke_all_for_user(&state.db, user_id).await?;
+
+    // the viewer stops serving a deleted account at once, the edge has to too
+    let queued = deletion::enqueue(&state.db, &[Pending::tag(deletion::user_tag(user_id))]).await?;
+    state.process_deletions(queued);
 
     let recoverable_until = deleted_at + chrono::Duration::days(state.config.recovery_window_days);
 

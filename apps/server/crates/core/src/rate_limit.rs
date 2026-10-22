@@ -1,5 +1,9 @@
 use actix_governor::{KeyExtractor, SimpleKeyExtractionError};
-use actix_web::{dev::ServiceRequest, http::header};
+use actix_web::{
+    dev::ServiceRequest,
+    http::header::{self, HeaderMap},
+    HttpRequest,
+};
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -7,15 +11,23 @@ use std::sync::Arc;
 use crate::auth::jwt;
 
 pub fn client_ip(req: &ServiceRequest) -> Option<IpAddr> {
-    if let Some(ip) = req
-        .headers()
+    ip_from(req.headers(), req.peer_addr())
+}
+
+/// client_ip for handlers, which see an HttpRequest
+pub fn request_ip(req: &HttpRequest) -> Option<IpAddr> {
+    ip_from(req.headers(), req.peer_addr())
+}
+
+fn ip_from(headers: &HeaderMap, peer: Option<std::net::SocketAddr>) -> Option<IpAddr> {
+    if let Some(ip) = headers
         .get("cf-connecting-ip")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().parse::<IpAddr>().ok())
     {
         return Some(ip);
     }
-    req.peer_addr().map(|addr| addr.ip())
+    peer.map(|addr| addr.ip())
 }
 
 #[derive(Clone)]

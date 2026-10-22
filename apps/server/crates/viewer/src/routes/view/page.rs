@@ -1,4 +1,4 @@
-use actix_web::{get, web, HttpResponse};
+use actix_web::{get, web, HttpRequest, HttpResponse};
 
 use iono_core::web::ApiResult;
 
@@ -11,8 +11,9 @@ pub async fn view_page(
     state: web::Data<AppState>,
     path: web::Path<String>,
     query: web::Query<ViewQuery>,
+    req: HttpRequest,
 ) -> ApiResult<HttpResponse> {
     let display_name = path.into_inner();
     let file = fetch_file(&state, &display_name).await?;
-    view_page_inner(&state, file, &format!("/raw/{display_name}"), &query).await
+    view_page_inner(&state, &req, file, &format!("/raw/{display_name}"), &query).await
 }

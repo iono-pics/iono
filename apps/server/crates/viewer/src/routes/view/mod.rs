@@ -7,9 +7,10 @@ use actix_web::{http::header, HttpRequest, HttpResponse};
 use bytes::Bytes;
 use futures_util::stream::{BoxStream, StreamExt};
 use iono_core::{
-    auth::password::verify_password_async,
+    auth::password::{hash_secret, is_legacy_secret_hash, verify_password_async, verify_secret},
     content_type, crypto,
     entities::{EmbedPreset, File},
+    rate_limit::request_ip,
     AppError,
 };
 use serde::Deserialize;
@@ -27,14 +28,15 @@ pub struct ViewQuery {
 
 async fn view_page_inner(
     state: &AppState,
+    req: &HttpRequest,
     file: File,
     raw_url_base: &str,
     query: &ViewQuery,
 ) -> ApiResult<HttpResponse> {
-    if !unlock(&file, query.password.as_deref()).await? {
+    if !unlock(state, req, &file, query.password.as_deref()).await? {
         return Err(AppError::NotFound.into());
     }
-    verify_user_key(&file, query.key.as_deref()).await?;
+    verify_user_key(state, req, &file, query.key.as_deref()).await?;
 
     let raw_url = append_query(
         raw_url_base,
@@ -64,25 +66,21 @@ async fn raw_file_inner(
     query: &ViewQuery,
     req: &HttpRequest,
 ) -> ApiResult<HttpResponse> {
-    if !unlock(&file, query.password.as_deref()).await? {
+    if !unlock(state, req, &file, query.password.as_deref()).await? {
         return Err(AppError::NotFound.into());
     }
 
-    let user_key = verify_user_key(&file, query.key.as_deref()).await?;
+    let user_key = verify_user_key(state, req, &file, query.key.as_deref()).await?;
 
     let range = req
         .headers()
         .get(header::RANGE)
         .and_then(|v| v.to_str().ok());
-    let object = state.storage.get(&file.original_name, range).await?;
-
-    let offset = object
-        .content_range
-        .as_deref()
-        .and_then(range_start)
-        .unwrap_or(0);
-    let layers = decryption_layers(state, &file, user_key.as_deref(), offset)?;
-    let stream = decrypting_stream(object.stream, layers);
+    let body = if file.encryption_format == crypto::FORMAT_SEGMENTED_GCM {
+        sealed_body(state, &file, user_key.as_deref(), range).await?
+    } else {
+        legacy_body(state, &file, user_key.as_deref(), range).await?
+    };
 
     let disposition = header::ContentDisposition {
         disposition: if content_type::is_inline_safe(&file.content_type) {
@@ -95,7 +93,7 @@ async fn raw_file_inner(
         )],
     };
 
-    let mut builder = if object.content_range.is_some() {
+    let mut builder = if body.content_range.is_some() {
         HttpResponse::PartialContent()
     } else {
         HttpResponse::Ok()
@@ -109,15 +107,187 @@ async fn raw_file_inner(
             cache::MaxAges::from_config(&state.config),
             &file,
         ))
+        .append_header(cache::file_tags(&file.id, &file.user_id))
         .append_header(disposition);
-    if let Some(content_range) = &object.content_range {
+    if let Some(content_range) = &body.content_range {
         builder.append_header((header::CONTENT_RANGE, content_range.clone()));
     }
-    if let Some(len) = object.content_length {
+    if let Some(len) = body.content_length {
         builder.no_chunking(len);
     }
 
-    Ok(builder.streaming(stream))
+    Ok(builder.streaming(body.stream))
+}
+
+struct Body {
+    stream: BoxStream<'static, std::io::Result<Bytes>>,
+    content_range: Option<String>,
+    content_length: Option<u64>,
+}
+
+/// format 2. the client's range is in plaintext bytes, which we widen to whole
+/// segments for storage, then open and trim back down
+async fn sealed_body(
+    state: &AppState,
+    file: &File,
+    user_key: Option<&str>,
+    range: Option<&str>,
+) -> Result<Body, AppError> {
+    let size = file.size_bytes as u64;
+    let wanted = match range.map(|r| parse_range(r, size)) {
+        None | Some(RangeRequest::Whole) => None,
+        Some(RangeRequest::Unsatisfiable) => return Err(AppError::RangeNotSatisfiable),
+        Some(RangeRequest::Bytes(start, end)) => Some((start, end)),
+    };
+    if size == 0 {
+        return Ok(Body {
+            stream: Box::pin(futures_util::stream::empty()),
+            content_range: None,
+            content_length: Some(0),
+        });
+    }
+
+    let key = sealed_content_key(state, file, user_key)?;
+    let (start, end) = wanted.unwrap_or((0, size - 1));
+    let sealed = crypto::sealed_range(size, start, end);
+    let object = state
+        .storage
+        .get(
+            &file.original_name,
+            Some(&format!(
+                "bytes={}-{}",
+                sealed.sealed_start, sealed.sealed_end_inclusive
+            )),
+        )
+        .await?;
+
+    Ok(Body {
+        stream: opening_stream(object.stream, crypto::Opener::new(&key, size, &sealed)),
+        content_range: wanted.map(|_| format!("bytes {start}-{end}/{size}")),
+        content_length: Some(end - start + 1),
+    })
+}
+
+fn sealed_content_key(
+    state: &AppState,
+    file: &File,
+    user_key: Option<&str>,
+) -> Result<[u8; crypto::KEY_LEN], AppError> {
+    let (Some(wrapped), Some(nonce), Some(salt), Some(version)) = (
+        file.wrapped_dek.as_deref(),
+        file.dek_iv.as_deref(),
+        file.encryption_iv.as_deref(),
+        file.encryption_key_version,
+    ) else {
+        return Err(AppError::internal("format 2 file has no key envelope"));
+    };
+    let dek = crypto::open_key(
+        state.keyring.get(version)?,
+        nonce,
+        wrapped,
+        &crypto::file_key_aad(&file.id),
+    )?;
+    let user_key = user_key.map(crypto::parse_key).transpose()?;
+    Ok(crypto::content_key(&dek, salt, user_key.as_ref()))
+}
+
+// a segment that fails authentication ends the response with an error, the
+// client never receives bytes we could not verify
+fn opening_stream(
+    inner: BoxStream<'static, std::io::Result<Bytes>>,
+    opener: crypto::Opener,
+) -> BoxStream<'static, std::io::Result<Bytes>> {
+    Box::pin(futures_util::stream::unfold(
+        Some((inner, opener)),
+        |state| async move {
+            let (mut inner, mut opener) = state?;
+            loop {
+                match inner.next().await {
+                    Some(Ok(bytes)) => match opener.push(&bytes) {
+                        Ok(plain) if plain.is_empty() => continue,
+                        Ok(plain) => return Some((Ok(Bytes::from(plain)), Some((inner, opener)))),
+                        Err(e) => return Some((Err(std::io::Error::other(e)), None)),
+                    },
+                    Some(Err(e)) => return Some((Err(e), None)),
+                    None => {
+                        return opener
+                            .finish()
+                            .err()
+                            .map(|e| (Err(std::io::Error::other(e)), None))
+                    }
+                }
+            }
+        },
+    ))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RangeRequest {
+    Whole,
+    Bytes(u64, u64),
+    Unsatisfiable,
+}
+
+/// one byte range, as media players send. anything we do not handle, like
+/// several ranges at once, is answered with the whole file as rfc 9110 allows
+fn parse_range(header: &str, size: u64) -> RangeRequest {
+    let Some(spec) = header.trim().strip_prefix("bytes=") else {
+        return RangeRequest::Whole;
+    };
+    if spec.contains(',') {
+        return RangeRequest::Whole;
+    }
+    let Some((first, last)) = spec.trim().split_once('-') else {
+        return RangeRequest::Whole;
+    };
+    let (first, last) = (first.trim(), last.trim());
+
+    if first.is_empty() {
+        return match last.parse::<u64>() {
+            Ok(0) => RangeRequest::Unsatisfiable,
+            Ok(_) if size == 0 => RangeRequest::Unsatisfiable,
+            Ok(suffix) => RangeRequest::Bytes(size.saturating_sub(suffix), size - 1),
+            Err(_) => RangeRequest::Whole,
+        };
+    }
+
+    let Ok(start) = first.parse::<u64>() else {
+        return RangeRequest::Whole;
+    };
+    let end = if last.is_empty() {
+        u64::MAX
+    } else {
+        match last.parse::<u64>() {
+            Ok(end) if end >= start => end,
+            _ => return RangeRequest::Whole,
+        }
+    };
+    if start >= size {
+        return RangeRequest::Unsatisfiable;
+    }
+    RangeRequest::Bytes(start, end.min(size - 1))
+}
+
+/// format 1 and unencrypted files. ctr maps bytes one to one, so storage can
+/// serve the client's range as is
+async fn legacy_body(
+    state: &AppState,
+    file: &File,
+    user_key: Option<&str>,
+    range: Option<&str>,
+) -> Result<Body, AppError> {
+    let object = state.storage.get(&file.original_name, range).await?;
+    let offset = object
+        .content_range
+        .as_deref()
+        .and_then(range_start)
+        .unwrap_or(0);
+    let layers = decryption_layers(state, file, user_key, offset)?;
+    Ok(Body {
+        stream: decrypting_stream(object.stream, layers),
+        content_range: object.content_range,
+        content_length: object.content_length,
+    })
 }
 
 fn range_start(content_range: &str) -> Option<u64> {
@@ -130,17 +300,52 @@ fn range_start(content_range: &str) -> Option<u64> {
         .ok()
 }
 
-async fn verify_user_key(file: &File, provided: Option<&str>) -> Result<Option<String>, AppError> {
-    let Some(hash) = file.user_key_hash.clone() else {
+async fn verify_user_key(
+    state: &AppState,
+    req: &HttpRequest,
+    file: &File,
+    provided: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    let Some(stored) = file.user_key_hash.as_deref() else {
         return Ok(None);
     };
-    let Some(provided) = provided.map(str::to_owned) else {
+    let Some(provided) = provided else {
         return Err(AppError::NotFound);
     };
-    if !verify_password_async(provided.clone(), hash).await? {
+
+    // only files from before keys got a fast hash still need argon2
+    let matched = if is_legacy_secret_hash(stored) {
+        let matched = state
+            .unlocker
+            .check(request_ip(req), &file.id, stored, provided, || async {
+                Ok(verify_secret(provided, stored).await?.matched())
+            })
+            .await?;
+        if matched {
+            upgrade_user_key_hash(state, &file.id, stored, provided).await;
+        }
+        matched
+    } else {
+        verify_secret(provided, stored).await?.matched()
+    };
+
+    if !matched {
         return Err(AppError::NotFound);
     }
-    Ok(Some(provided))
+    Ok(Some(provided.to_owned()))
+}
+
+async fn upgrade_user_key_hash(state: &AppState, file_id: &str, legacy: &str, key: &str) {
+    let result =
+        sqlx::query("UPDATE files SET user_key_hash = $1 WHERE id = $2 AND user_key_hash = $3")
+            .bind(hash_secret(key))
+            .bind(file_id)
+            .bind(legacy)
+            .execute(&state.db)
+            .await;
+    if let Err(e) = result {
+        tracing::warn!(file_id = %file_id, error = %e, "could not upgrade user key hash");
+    }
 }
 
 fn decryption_layers(
@@ -157,7 +362,9 @@ fn decryption_layers(
             .get(file.encryption_key_version.unwrap_or(1))?;
 
         let key = match (file.wrapped_dek.as_deref(), file.dek_iv.as_deref()) {
-            (Some(wrapped), Some(dek_iv)) => crypto::unwrap_key(kek, &iv_array(dek_iv)?, wrapped)?,
+            (Some(wrapped), Some(dek_iv)) => {
+                crypto::open_key(kek, dek_iv, wrapped, &crypto::file_key_aad(&file.id))?
+            }
             _ => *kek,
         };
 
@@ -263,15 +470,25 @@ async fn fetch_active_preset(db: &PgPool, user_id: &str) -> Result<Option<Active
     .map_err(AppError::from)
 }
 
-async fn unlock(file: &File, provided: Option<&str>) -> Result<bool, AppError> {
-    let Some(hash) = file.password_hash.clone() else {
+async fn unlock(
+    state: &AppState,
+    req: &HttpRequest,
+    file: &File,
+    provided: Option<&str>,
+) -> Result<bool, AppError> {
+    let Some(stored) = file.password_hash.as_deref() else {
         return Ok(true);
     };
-    let Some(provided) = provided.map(str::to_owned) else {
+    let Some(provided) = provided else {
         return Ok(false);
     };
 
-    verify_password_async(provided, hash).await
+    state
+        .unlocker
+        .check(request_ip(req), &file.id, stored, provided, || {
+            verify_password_async(provided.to_owned(), stored.to_owned())
+        })
+        .await
 }
 
 #[cfg(test)]
@@ -302,6 +519,45 @@ mod tests {
         .execute(db)
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn ranges_cover_what_media_players_send() {
+        assert_eq!(parse_range("bytes=0-99", 1000), RangeRequest::Bytes(0, 99));
+        assert_eq!(
+            parse_range("bytes=500-", 1000),
+            RangeRequest::Bytes(500, 999)
+        );
+        assert_eq!(
+            parse_range("bytes=-100", 1000),
+            RangeRequest::Bytes(900, 999)
+        );
+        assert_eq!(
+            parse_range("bytes=-5000", 1000),
+            RangeRequest::Bytes(0, 999)
+        );
+        assert_eq!(
+            parse_range("bytes=900-5000", 1000),
+            RangeRequest::Bytes(900, 999)
+        );
+    }
+
+    #[test]
+    fn ranges_past_the_end_are_unsatisfiable() {
+        assert_eq!(
+            parse_range("bytes=1000-", 1000),
+            RangeRequest::Unsatisfiable
+        );
+        assert_eq!(parse_range("bytes=-0", 1000), RangeRequest::Unsatisfiable);
+        assert_eq!(parse_range("bytes=0-", 0), RangeRequest::Unsatisfiable);
+    }
+
+    #[test]
+    fn ranges_we_do_not_handle_get_the_whole_file() {
+        assert_eq!(parse_range("bytes=0-1,5-6", 1000), RangeRequest::Whole);
+        assert_eq!(parse_range("items=0-1", 1000), RangeRequest::Whole);
+        assert_eq!(parse_range("bytes=9-3", 1000), RangeRequest::Whole);
+        assert_eq!(parse_range("bytes=x-3", 1000), RangeRequest::Whole);
     }
 
     #[sqlx::test(migrations = "../../migrations")]

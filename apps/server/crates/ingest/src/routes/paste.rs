@@ -43,7 +43,13 @@ pub async fn create_paste(
     let body = body.into_inner();
     validate(&body, state.config.max_paste_content_bytes)?;
 
-    iono_core::quota::check_storage_quota(&state.db, &user.0.id, body.content.len() as i64).await?;
+    let reservation = iono_core::quota::reserve_bytes(
+        &state.db,
+        &user.0.id,
+        body.content.len() as i64,
+        chrono::Duration::minutes(5),
+    )
+    .await?;
 
     let settings =
         sqlx::query_as::<_, UserSettings>("SELECT * FROM user_settings WHERE user_id = $1")
@@ -62,6 +68,7 @@ pub async fn create_paste(
         None => None,
     };
 
+    let mut tx = state.db.begin().await.map_err(AppError::from)?;
     let mut paste = None;
     for _ in 0..5 {
         let id = Uuid::new_v4().to_string();
@@ -86,7 +93,7 @@ pub async fn create_paste(
         .bind(&password_hash)
         .bind(expires_at)
         .bind(body.e2e_encrypted)
-        .fetch_optional(&state.db)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(AppError::from)?;
 
@@ -97,6 +104,8 @@ pub async fn create_paste(
 
     let (id, key) =
         paste.ok_or_else(|| AppError::internal("failed to generate a unique paste key"))?;
+    reservation.settle(&mut *tx).await?;
+    tx.commit().await.map_err(AppError::from)?;
 
     let (domain, path_prefix) = sqlx::query_as::<_, (String, Option<String>)>(
         r#"

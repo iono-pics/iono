@@ -42,7 +42,7 @@ pub async fn require_passkey(
     body: web::Json<RequirePasskeyRequest>,
 ) -> ApiResult<HttpResponse> {
     let reauth = ReauthRequest::new(body.password.clone(), body.totp_code.clone());
-    require_reauth(&user.0, &reauth).await?;
+    require_reauth(&state, &user.0, &reauth).await?;
 
     if body.required && registered_passkey_count(&state.db, &user.0.id).await? == 0 {
         return Err(AppError::BadRequest("register a passkey before requiring one".into()).into());

@@ -1,6 +1,7 @@
 use actix_web::{get, patch, web, HttpResponse};
 use chrono::{DateTime, Utc};
 use iono_core::{
+    deletion::{self, Pending},
     entities::DomainSettings,
     web::{ApiResult, MapDbError, Patch},
     AppError,
@@ -183,6 +184,14 @@ pub async fn update_domain_settings(
     let Some(settings) = updated else {
         return Err(AppError::internal("user has no domain_settings row").into());
     };
+
+    // the old urls no longer resolve at the origin, so the edge must not keep
+    // answering for them
+    if files_domain_p || files_prefix_p || pastes_domain_p || pastes_prefix_p {
+        let queued =
+            deletion::enqueue(&state.db, &[Pending::tag(deletion::user_tag(&user.0.id))]).await?;
+        state.process_deletions(queued);
+    }
 
     Ok(HttpResponse::Ok().json(DomainSettingsResponse::from(settings)))
 }

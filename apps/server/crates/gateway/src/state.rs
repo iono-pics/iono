@@ -1,5 +1,7 @@
 use iono_core::{
     cloudflare::CloudflareClient,
+    crypto::Keyring,
+    deletion::Deleter,
     oauth::OAuthClient,
     state::{HasDb, HasJwtSecret},
     storage::Storage,
@@ -18,6 +20,31 @@ pub struct AppState {
     pub stripe: Option<stripe::Client>,
     pub config: Config,
     pub webauthn: Webauthn,
+    /// seals totp secrets at rest
+    pub keyring: Keyring,
+}
+
+impl AppState {
+    /// finishes queued deletions off the request path, whatever fails here
+    /// stays queued for the janitor
+    pub fn process_deletions(&self, ids: Vec<String>) {
+        if ids.is_empty() {
+            return;
+        }
+        let db = self.db.clone();
+        let storage = self.storage.clone();
+        let cloudflare = self.cloudflare.clone();
+        tokio::spawn(async move {
+            let deleter = Deleter {
+                db: &db,
+                storage: storage.as_ref(),
+                cloudflare: &cloudflare,
+            };
+            if let Err(e) = deleter.process_ids(&ids).await {
+                tracing::warn!(error = %e, "pending deletions left for the janitor");
+            }
+        });
+    }
 }
 
 impl HasDb for AppState {

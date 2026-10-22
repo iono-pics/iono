@@ -4,7 +4,10 @@ use bytes::Bytes;
 use chrono::{Duration, Utc};
 use futures_util::{stream, TryStreamExt};
 use iono_core::{
-    auth::{password::hash_password_async, token},
+    auth::{
+        password::{hash_password_async, hash_secret},
+        token,
+    },
     content_type, crypto,
     entities::{File, Plan, UserSettings},
     image_compress, quota, validators, AppError,
@@ -21,7 +24,9 @@ use iono_core::web::{append_query, ApiResult};
 
 use crate::{auth::ApiKeyUser, state::AppState};
 
-const SNIFF_BYTES: usize = 8192;
+pub(crate) const SNIFF_BYTES: usize = 8192;
+// one request through the edge is at most a few hundred MB
+const RESERVATION_TTL: Duration = Duration::hours(1);
 const MAX_TEXT_FIELD_BYTES: usize = 8192;
 const CHANNEL_DEPTH: usize = 4;
 const PUMP_CHUNK: usize = 256 * 1024;
@@ -57,23 +62,27 @@ pub async fn upload_file(
     req: HttpRequest,
     mut payload: Multipart,
 ) -> ApiResult<HttpResponse> {
-    let settings =
-        sqlx::query_as::<_, UserSettings>("SELECT * FROM user_settings WHERE user_id = $1")
-            .bind(&user.0.id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(AppError::from)?
-            .ok_or_else(|| AppError::internal("user has no settings configured"))?;
+    let settings = user_settings(&state, &user.0.id).await?;
 
-    let plan = quota::plan_for_user(&state.db, &user.0.id).await?;
-    let used = quota::storage_used_bytes(&state.db, &user.0.id).await?;
-    let budget = Budget::new(&plan, used, state.config.max_upload_size_bytes);
-
-    if let Some(declared) = declared_length(&req) {
-        if declared > budget.limit {
-            return Err(budget.exceeded().into());
-        }
-    }
+    // claimed before a byte is read, so concurrent uploads see each other.
+    // the declared length bounds the claim, the stream is held to it below
+    let declared = declared_length(&req);
+    let cap = state.config.max_upload_size_bytes;
+    let mut decided = None;
+    let reservation = quota::reserve(&state.db, &user.0.id, RESERVATION_TTL, |plan, used| {
+        let budget = Budget::new(plan, used, cap);
+        let wanted = declared.unwrap_or(budget.limit);
+        let claim = if wanted > budget.limit {
+            Err(budget.exceeded())
+        } else {
+            Ok(wanted as i64)
+        };
+        decided = Some(budget);
+        claim
+    })
+    .await?;
+    let mut budget = decided.ok_or_else(|| AppError::internal("quota was not decided"))?;
+    budget.limit = reservation.bytes as u64;
 
     let mut plain_password: Option<String> = None;
     let mut uploaded: Option<Uploaded> = None;
@@ -104,6 +113,39 @@ pub async fn upload_file(
         return Err(AppError::BadRequest("missing file".into()).into());
     };
 
+    let url = finalize(
+        &state,
+        &user.0.id,
+        &settings,
+        uploaded,
+        plain_password,
+        Some(reservation),
+    )
+    .await?;
+    Ok(HttpResponse::Created().json(serde_json::json!({ "url": url })))
+}
+
+pub(crate) async fn user_settings(
+    state: &AppState,
+    user_id: &str,
+) -> Result<UserSettings, AppError> {
+    sqlx::query_as::<_, UserSettings>("SELECT * FROM user_settings WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError::internal("user has no settings configured"))
+}
+
+/// writes the files row for an object already in storage and builds its share url
+pub(crate) async fn finalize(
+    state: &AppState,
+    user_id: &str,
+    settings: &UserSettings,
+    uploaded: Uploaded,
+    plain_password: Option<String>,
+    reservation: Option<quota::Reservation>,
+) -> Result<String, AppError> {
     if let Some(password) = plain_password.as_deref() {
         validators::password(password, 256)?;
     }
@@ -112,24 +154,27 @@ pub async fn upload_file(
         None => None,
     };
 
-    let (user_key, user_key_iv, user_key_hash) = match uploaded.user_key {
-        Some((key, iv)) => {
+    let (user_key, user_key_hash) = match uploaded.user_key {
+        Some(key) => {
             let encoded = crypto::encode_key(&key);
-            let hash = hash_password_async(encoded.clone()).await?;
-            (Some(encoded), Some(iv.to_vec()), Some(hash))
+            let hash = hash_secret(&encoded);
+            (Some(encoded), Some(hash))
         }
-        None => (None, None, None),
+        None => (None, None),
     };
 
-    let dek_iv = crypto::random_iv();
-    let wrapped_dek = crypto::wrap_key(state.keyring.current(), &dek_iv, &uploaded.dek)?;
+    let id = Uuid::new_v4().to_string();
+    let (wrapped_dek, dek_iv) = crypto::seal_key(
+        state.keyring.current(),
+        &uploaded.dek,
+        &crypto::file_key_aad(&id),
+    )?;
     let encryption_key_version = state.keyring.current_version();
 
     let expires_at = settings
         .default_expires_in_seconds
         .map(|secs| Utc::now() + Duration::seconds(secs));
 
-    let id = Uuid::new_v4().to_string();
     let extension = content_type::extension_for(&uploaded.mime_type);
     let display_name_stem = token::generate_display_name(
         settings.display_name_length as usize,
@@ -142,7 +187,7 @@ pub async fn upload_file(
     };
 
     let db = state.db.clone();
-    let user_id = user.0.id.clone();
+    let owner_id = user_id.to_owned();
     let Uploaded {
         s3_key,
         mime_type,
@@ -150,20 +195,21 @@ pub async fn upload_file(
         encryption_iv,
         ..
     } = uploaded;
-    let display_name_finalize = display_name.clone();
 
-    // detached so a client disconnecting cant orphan the object we just wrote
+    // detached so a client disconnecting cant orphan the object we just wrote.
+    // the claim on quota becomes the row in one step
     let finalize = tokio::spawn(async move {
-        sqlx::query_as::<_, File>(
+        let mut tx = db.begin().await?;
+        let file = sqlx::query_as::<_, File>(
             r#"
-            INSERT INTO files (id, user_id, display_name, original_name, content_type, size_bytes, password_hash, expires_at, encrypted, encryption_iv, user_key_iv, user_key_hash, encryption_key_version, wrapped_dek, dek_iv)
+            INSERT INTO files (id, user_id, display_name, original_name, content_type, size_bytes, password_hash, expires_at, encrypted, encryption_iv, user_key_hash, encryption_key_version, wrapped_dek, dek_iv, encryption_format)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             RETURNING *
             "#,
         )
         .bind(&id)
-        .bind(&user_id)
-        .bind(&display_name_finalize)
+        .bind(&owner_id)
+        .bind(&display_name)
         .bind(&s3_key)
         .bind(&mime_type)
         .bind(size_bytes)
@@ -171,14 +217,18 @@ pub async fn upload_file(
         .bind(expires_at)
         .bind(user_key_hash.is_some())
         .bind(encryption_iv.to_vec())
-        .bind(&user_key_iv)
         .bind(&user_key_hash)
         .bind(encryption_key_version)
-        .bind(wrapped_dek.to_vec())
-        .bind(dek_iv.to_vec())
-        .fetch_one(&db)
-        .await
-        .map_err(AppError::from)
+        .bind(&wrapped_dek)
+        .bind(&dek_iv)
+        .bind(crypto::FORMAT_SEGMENTED_GCM)
+        .fetch_one(&mut *tx)
+        .await?;
+        if let Some(reservation) = reservation {
+            reservation.settle(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok::<_, AppError>(file)
     });
 
     let file = finalize
@@ -193,7 +243,7 @@ pub async fn upload_file(
         WHERE ds.user_id = $1
         "#,
     )
-    .bind(&user.0.id)
+    .bind(user_id)
     .fetch_optional(&state.db)
     .await
     .map_err(AppError::from)?
@@ -209,25 +259,23 @@ pub async fn upload_file(
         format!("https://{files_domain}/{prefix}{}", file.display_name)
     };
 
-    let url = append_query(
+    Ok(append_query(
         &base_url,
         &[
             ("password", plain_password.as_deref()),
             ("key", user_key.as_deref()),
         ],
-    );
-
-    Ok(HttpResponse::Created().json(serde_json::json!({ "url": url })))
+    ))
 }
 
-struct Budget {
-    limit: u64,
+pub(crate) struct Budget {
+    pub(crate) limit: u64,
     plan_limit: i64,
     remaining_quota: i64,
 }
 
 impl Budget {
-    fn new(plan: &Plan, used: i64, server_cap: usize) -> Self {
+    pub(crate) fn new(plan: &Plan, used: i64, server_cap: usize) -> Self {
         let remaining_quota = plan.storage_quota_bytes.saturating_sub(used).max(0);
         let limit = plan
             .max_upload_bytes
@@ -241,7 +289,7 @@ impl Budget {
         }
     }
 
-    fn exceeded(&self) -> AppError {
+    pub(crate) fn exceeded(&self) -> AppError {
         if self.limit as i64 == self.plan_limit {
             AppError::PaymentRequired("file is too large, consider upgrading your plan.".to_owned())
         } else if self.limit as i64 == self.remaining_quota {
@@ -254,13 +302,17 @@ impl Budget {
     }
 }
 
-struct Uploaded {
-    s3_key: String,
-    mime_type: String,
-    size_bytes: i64,
-    encryption_iv: [u8; crypto::IV_LEN],
-    dek: [u8; crypto::KEY_LEN],
-    user_key: Option<([u8; crypto::KEY_LEN], [u8; crypto::IV_LEN])>,
+/// the optional key only the share link carries, mixed into the content key
+pub(crate) type UserKey = [u8; crypto::KEY_LEN];
+
+pub(crate) struct Uploaded {
+    pub(crate) s3_key: String,
+    pub(crate) mime_type: String,
+    pub(crate) size_bytes: i64,
+    /// the content key salt
+    pub(crate) encryption_iv: [u8; crypto::IV_LEN],
+    pub(crate) dek: [u8; crypto::KEY_LEN],
+    pub(crate) user_key: Option<UserKey>,
 }
 
 async fn store_field(
@@ -296,16 +348,14 @@ async fn store_field(
     let extension = content_type::extension_for(&mime_type);
     let s3_key = format!("{}.{extension}", Uuid::new_v4());
 
-    let user_key = encrypt_for_user.then(|| (crypto::random_key(), crypto::random_iv()));
+    let user_key = encrypt_for_user.then(crypto::random_key);
     let dek = crypto::random_key();
     let encryption_iv = crypto::random_iv();
-
-    let mut keystreams = vec![crypto::Keystream::at(&dek, &encryption_iv, 0)?];
-    if let Some((key, iv)) = user_key {
-        keystreams.push(crypto::Keystream::at(&key, &iv, 0)?);
-    }
-
-    let mut layers = crypto::Layers::new(keystreams);
+    let mut sealer = crypto::Sealer::new(&crypto::content_key(
+        &dek,
+        &encryption_iv,
+        user_key.as_ref(),
+    ));
 
     let (tx, rx) = mpsc::channel::<Result<Bytes, AppError>>(CHANNEL_DEPTH);
 
@@ -338,23 +388,19 @@ async fn store_field(
     let mut written = 0u64;
     let mut prefix = Bytes::from(prefix);
 
-    loop {
+    let whole_body = loop {
         let chunk = if !prefix.is_empty() {
             prefix.split_to(prefix.len().min(PUMP_CHUNK))
         } else {
             let Some(reading) = field.as_mut() else {
-                sent_whole_body.store(true, Ordering::SeqCst);
-                break;
+                break true;
             };
             match reading.try_next().await {
                 Ok(Some(chunk)) => chunk,
-                Ok(None) => {
-                    sent_whole_body.store(true, Ordering::SeqCst);
-                    break;
-                }
+                Ok(None) => break true,
                 Err(e) => {
                     let _ = tx.send(Err(malformed_body(e))).await;
-                    break;
+                    break false;
                 }
             }
         };
@@ -362,16 +408,27 @@ async fn store_field(
         written += chunk.len() as u64;
         if written > budget.limit {
             let _ = tx.send(Err(budget.exceeded())).await;
-            break;
+            break false;
         }
 
-        let mut buf = chunk.to_vec();
-        layers.apply(&mut buf);
-        if tx.send(Ok(Bytes::from(buf))).await.is_err() {
-            break;
+        let sealed = match sealer.push(&chunk) {
+            Ok(sealed) => sealed,
+            Err(e) => {
+                let _ = tx.send(Err(e)).await;
+                break false;
+            }
+        };
+        if tx.send(Ok(Bytes::from(sealed))).await.is_err() {
+            break false;
         }
+    };
+
+    // the final segment is only sealed once we know it is the final one
+    if whole_body {
+        sent_whole_body.store(true, Ordering::SeqCst);
+        let last = sealer.finish().map(Bytes::from);
+        let _ = tx.send(last).await;
     }
-
     drop(tx);
     writer
         .await
@@ -564,24 +621,27 @@ mod tests {
                 .keyring
                 .get(row.encryption_key_version.unwrap())
                 .unwrap();
-            let dek = crypto::unwrap_key(
+            assert_eq!(row.encryption_format, crypto::FORMAT_SEGMENTED_GCM);
+            let dek = crypto::open_key(
                 kek,
-                &iv(row.dek_iv.as_deref().unwrap()),
+                row.dek_iv.as_deref().unwrap(),
                 row.wrapped_dek.as_deref().unwrap(),
+                &crypto::file_key_aad(&row.id),
             )
             .unwrap();
+            let user_key = user_key.map(|k| crypto::parse_key(k).unwrap());
+            let key = crypto::content_key(
+                &dek,
+                row.encryption_iv.as_deref().unwrap(),
+                user_key.as_ref(),
+            );
 
-            let mut keystreams =
-                vec![
-                    crypto::Keystream::at(&dek, &iv(row.encryption_iv.as_deref().unwrap()), 0)
-                        .unwrap(),
-                ];
-            if let (Some(key), Some(key_iv)) = (user_key, row.user_key_iv.as_deref()) {
-                let key = crypto::parse_key(key).unwrap();
-                keystreams.push(crypto::Keystream::at(&key, &iv(key_iv), 0).unwrap());
-            }
-            crypto::Layers::new(keystreams).apply(&mut cipher);
-            cipher
+            let size = row.size_bytes as u64;
+            let range = crypto::sealed_range(size, 0, size - 1);
+            let mut opener = crypto::Opener::new(&key, size, &range);
+            let plain = opener.push(&cipher).unwrap();
+            opener.finish().unwrap();
+            plain
         }
 
         async fn cleanup(&self) {
@@ -601,10 +661,6 @@ mod tests {
                 .await
                 .unwrap();
         }
-    }
-
-    fn iv(bytes: &[u8]) -> [u8; crypto::IV_LEN] {
-        bytes.try_into().unwrap()
     }
 
     fn pattern(len: usize) -> Vec<u8> {

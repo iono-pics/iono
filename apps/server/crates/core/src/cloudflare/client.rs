@@ -4,7 +4,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::cloudflare::endpoints::purge::PurgeCache;
+use crate::cloudflare::endpoints::purge::{PurgeCache, PurgeTarget};
 
 const API_BASE: &str = "https://api.cloudflare.com/client/v4";
 
@@ -78,23 +78,35 @@ impl CloudflareClient {
     }
 
     pub async fn purge_urls(&self, urls: Vec<String>) -> Result<(), ApiError> {
+        self.purge(urls, PurgeTarget::Files).await
+    }
+
+    pub async fn purge_tags(&self, tags: Vec<String>) -> Result<(), ApiError> {
+        self.purge(tags, PurgeTarget::Tags).await
+    }
+
+    async fn purge(
+        &self,
+        items: Vec<String>,
+        target: fn(Vec<String>) -> PurgeTarget,
+    ) -> Result<(), ApiError> {
         const CHUNK: usize = 30;
 
-        if urls.is_empty() {
+        if items.is_empty() {
             return Ok(());
         }
         let Some(zone_id) = &self.zone_id else {
             tracing::debug!(
-                count = urls.len(),
+                count = items.len(),
                 "cloudflare not configured; skipping purge"
             );
             return Ok(());
         };
 
-        for chunk in urls.chunks(CHUNK) {
+        for chunk in items.chunks(CHUNK) {
             let endpoint = PurgeCache {
                 zone_id,
-                files: chunk.to_vec(),
+                target: target(chunk.to_vec()),
             };
             self.request(&endpoint).await?;
         }

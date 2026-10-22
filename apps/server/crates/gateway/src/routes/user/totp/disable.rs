@@ -27,7 +27,7 @@ pub async fn disable_totp(
     user: JwtUser,
     body: web::Json<ReauthRequest>,
 ) -> ApiResult<HttpResponse> {
-    require_reauth(&user.0, &body).await?;
+    require_reauth(&state, &user.0, &body).await?;
 
     let new_token_version = user.0.token_version + 1;
 

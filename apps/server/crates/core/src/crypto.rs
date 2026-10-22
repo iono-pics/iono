@@ -1,6 +1,9 @@
 use aes::Aes256;
+use aes_gcm::aead::{AeadInPlace, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce, Tag};
 use ctr::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
 use rand::Rng;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 use crate::error::{AppError, AppResult};
@@ -148,9 +151,529 @@ pub fn unwrap_key(
     wrap_key(kek, iv, &wrapped)
 }
 
+// format 1 is aes-ctr: no integrity, a flipped ciphertext bit flips the same
+// plaintext bit. it is only read now, for files written before format 2
+
+/// how a files row's object is encrypted
+pub const FORMAT_CTR: i16 = 1;
+/// aes-256-gcm over fixed size segments, see Sealer
+pub const FORMAT_SEGMENTED_GCM: i16 = 2;
+
+/// plaintext bytes per segment. small enough that a range read wastes little,
+/// big enough that the 16 byte tags cost 0.02%
+pub const SEGMENT_LEN: usize = 64 * 1024;
+pub const TAG_LEN: usize = 16;
+pub const SEALED_SEGMENT_LEN: usize = SEGMENT_LEN + TAG_LEN;
+pub const WRAP_NONCE_LEN: usize = 12;
+
+/// the key a format 2 object is sealed under. a file with a user key needs
+/// both secrets, so one aead pass covers what used to be two ctr layers
+pub fn content_key(
+    dek: &[u8; KEY_LEN],
+    salt: &[u8],
+    user_key: Option<&[u8; KEY_LEN]>,
+) -> [u8; KEY_LEN] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"iono file content key v2\0");
+    hasher.update((salt.len() as u64).to_be_bytes());
+    hasher.update(salt);
+    hasher.update(dek);
+    match user_key {
+        Some(key) => {
+            hasher.update([1]);
+            hasher.update(key);
+        }
+        None => hasher.update([0]),
+    }
+    hasher.finalize().into()
+}
+
+pub fn segment_count(plain_len: u64) -> u64 {
+    plain_len.div_ceil(SEGMENT_LEN as u64).max(1)
+}
+
+pub fn sealed_len(plain_len: u64) -> u64 {
+    plain_len + segment_count(plain_len) * TAG_LEN as u64
+}
+
+// the per file key makes a counter nonce safe. the last flag means dropping
+// trailing segments fails to open instead of quietly truncating the file
+fn segment_nonce(index: u64, last: bool) -> [u8; 12] {
+    let mut nonce = [0u8; 12];
+    nonce[..8].copy_from_slice(&index.to_be_bytes());
+    nonce[11] = last as u8;
+    nonce
+}
+
+fn gcm(key: &[u8; KEY_LEN]) -> Aes256Gcm {
+    Aes256Gcm::new(key.into())
+}
+
+/// seals plaintext into consecutive segments as it arrives
+pub struct Sealer {
+    cipher: Aes256Gcm,
+    next: u64,
+    pending: Vec<u8>,
+}
+
+impl Sealer {
+    pub fn new(key: &[u8; KEY_LEN]) -> Self {
+        Self::starting_at(key, 0)
+    }
+
+    /// for sealing one slice of a file, like one part of a chunked upload
+    pub fn starting_at(key: &[u8; KEY_LEN], segment: u64) -> Self {
+        Self {
+            cipher: gcm(key),
+            next: segment,
+            pending: Vec::with_capacity(SEGMENT_LEN),
+        }
+    }
+
+    pub fn push(&mut self, mut data: &[u8]) -> AppResult<Vec<u8>> {
+        let mut out = Vec::with_capacity(data.len() + (data.len() / SEGMENT_LEN + 1) * TAG_LEN);
+        loop {
+            // a full segment waits until more data proves it is not the last
+            if self.pending.len() == SEGMENT_LEN && !data.is_empty() {
+                let segment = std::mem::replace(&mut self.pending, Vec::with_capacity(SEGMENT_LEN));
+                self.seal_into(segment, false, &mut out)?;
+            }
+            if data.is_empty() {
+                return Ok(out);
+            }
+            let take = (SEGMENT_LEN - self.pending.len()).min(data.len());
+            self.pending.extend_from_slice(&data[..take]);
+            data = &data[take..];
+        }
+    }
+
+    /// seals what is left as the file's final segment
+    pub fn finish(mut self) -> AppResult<Vec<u8>> {
+        let mut out = Vec::with_capacity(self.pending.len() + TAG_LEN);
+        let segment = std::mem::take(&mut self.pending);
+        self.seal_into(segment, true, &mut out)?;
+        Ok(out)
+    }
+
+    /// seals what is left when more of the file follows elsewhere, which
+    /// only works on a segment boundary
+    pub fn finish_not_last(mut self) -> AppResult<Vec<u8>> {
+        if self.pending.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.pending.len() != SEGMENT_LEN {
+            return Err(AppError::internal(
+                "a slice that is not the end of a file must end on a segment boundary",
+            ));
+        }
+        let mut out = Vec::with_capacity(SEALED_SEGMENT_LEN);
+        let segment = std::mem::take(&mut self.pending);
+        self.seal_into(segment, false, &mut out)?;
+        Ok(out)
+    }
+
+    fn seal_into(&mut self, mut segment: Vec<u8>, last: bool, out: &mut Vec<u8>) -> AppResult<()> {
+        let tag = self
+            .cipher
+            .encrypt_in_place_detached(
+                &Nonce::from(segment_nonce(self.next, last)),
+                b"",
+                &mut segment,
+            )
+            .map_err(|_| AppError::internal("sealing a segment failed"))?;
+        out.extend_from_slice(&segment);
+        out.extend_from_slice(&tag);
+        self.next += 1;
+        Ok(())
+    }
+}
+
+/// which sealed bytes hold a plaintext range, and how to cut it back out
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SealedRange {
+    pub first_segment: u64,
+    /// plaintext bytes to drop from the front of the first segment
+    pub skip: usize,
+    /// plaintext bytes to yield
+    pub len: u64,
+    pub sealed_start: u64,
+    pub sealed_end_inclusive: u64,
+}
+
+/// `start..=end` is a plaintext range inside a file of `plain_len` bytes
+pub fn sealed_range(plain_len: u64, start: u64, end: u64) -> SealedRange {
+    let seg = SEGMENT_LEN as u64;
+    let first_segment = start / seg;
+    let last_segment = end / seg;
+    SealedRange {
+        first_segment,
+        skip: (start - first_segment * seg) as usize,
+        len: end - start + 1,
+        sealed_start: first_segment * SEALED_SEGMENT_LEN as u64,
+        sealed_end_inclusive: ((last_segment + 1) * SEALED_SEGMENT_LEN as u64)
+            .min(sealed_len(plain_len))
+            - 1,
+    }
+}
+
+/// opens sealed segments as they arrive. any tampered, reordered or missing
+/// segment is an error, never wrong plaintext
+pub struct Opener {
+    cipher: Aes256Gcm,
+    next: u64,
+    last: u64,
+    last_sealed_len: usize,
+    pending: Vec<u8>,
+    skip: usize,
+    remaining: u64,
+}
+
+impl Opener {
+    pub fn new(key: &[u8; KEY_LEN], plain_len: u64, range: &SealedRange) -> Self {
+        let last = segment_count(plain_len) - 1;
+        Self {
+            cipher: gcm(key),
+            next: range.first_segment,
+            last,
+            last_sealed_len: (plain_len - last * SEGMENT_LEN as u64) as usize + TAG_LEN,
+            pending: Vec::new(),
+            skip: range.skip,
+            remaining: range.len,
+        }
+    }
+
+    pub fn push(&mut self, data: &[u8]) -> AppResult<Vec<u8>> {
+        self.pending.extend_from_slice(data);
+        let mut out = Vec::new();
+        let mut at = 0;
+        while self.remaining > 0 {
+            let need = if self.next == self.last {
+                self.last_sealed_len
+            } else {
+                SEALED_SEGMENT_LEN
+            };
+            if self.pending.len() - at < need {
+                break;
+            }
+            let body_end = at + need - TAG_LEN;
+            let mut segment = self.pending[at..body_end].to_vec();
+            let tag: [u8; TAG_LEN] = self.pending[body_end..at + need]
+                .try_into()
+                .map_err(|_| AppError::internal("segment tag is the wrong length"))?;
+            self.cipher
+                .decrypt_in_place_detached(
+                    &Nonce::from(segment_nonce(self.next, self.next == self.last)),
+                    b"",
+                    &mut segment,
+                    &Tag::from(tag),
+                )
+                .map_err(|_| AppError::internal("stored object failed authentication"))?;
+            at += need;
+            self.next += 1;
+
+            let from = std::mem::take(&mut self.skip).min(segment.len());
+            let upto = (from as u64 + self.remaining).min(segment.len() as u64) as usize;
+            out.extend_from_slice(&segment[from..upto]);
+            self.remaining -= (upto - from) as u64;
+        }
+        self.pending.drain(..at);
+        Ok(out)
+    }
+
+    pub fn finish(&self) -> AppResult<()> {
+        if self.remaining > 0 {
+            return Err(AppError::internal(
+                "stored object ended before the range did",
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub fn file_key_aad(file_id: &str) -> Vec<u8> {
+    [b"iono file dek\0".as_slice(), file_id.as_bytes()].concat()
+}
+
+/// wraps a data key under a kek, bound to `aad` so a wrapped key copied onto
+/// another row will not open there. returns (wrapped, nonce)
+pub fn seal_key(
+    kek: &[u8; KEY_LEN],
+    key: &[u8; KEY_LEN],
+    aad: &[u8],
+) -> AppResult<(Vec<u8>, Vec<u8>)> {
+    seal_bytes(kek, key, aad)
+}
+
+/// aes-gcm for a small secret kept in the database. returns (sealed, nonce)
+pub fn seal_bytes(kek: &[u8; KEY_LEN], plain: &[u8], aad: &[u8]) -> AppResult<(Vec<u8>, Vec<u8>)> {
+    let mut nonce = [0u8; WRAP_NONCE_LEN];
+    rand::rng().fill_bytes(&mut nonce);
+    let mut sealed = plain.to_vec();
+    let tag = gcm(kek)
+        .encrypt_in_place_detached(&Nonce::from(nonce), aad, &mut sealed)
+        .map_err(|_| AppError::internal("sealing a secret failed"))?;
+    sealed.extend_from_slice(&tag);
+    Ok((sealed, nonce.to_vec()))
+}
+
+pub fn open_bytes(
+    kek: &[u8; KEY_LEN],
+    nonce: &[u8],
+    sealed: &[u8],
+    aad: &[u8],
+) -> AppResult<Vec<u8>> {
+    let malformed = || AppError::internal("stored secret is malformed");
+    let nonce: [u8; WRAP_NONCE_LEN] = nonce.try_into().map_err(|_| malformed())?;
+    let body_len = sealed.len().checked_sub(TAG_LEN).ok_or_else(malformed)?;
+    let (body, tag) = sealed.split_at(body_len);
+    let tag: [u8; TAG_LEN] = tag.try_into().map_err(|_| malformed())?;
+    let mut plain = body.to_vec();
+    gcm(kek)
+        .decrypt_in_place_detached(&Nonce::from(nonce), aad, &mut plain, &Tag::from(tag))
+        .map_err(|_| AppError::internal("stored secret failed authentication"))?;
+    Ok(plain)
+}
+
+/// opens a key from seal_key, or one from the older unauthenticated ctr wrap
+pub fn open_key(
+    kek: &[u8; KEY_LEN],
+    nonce: &[u8],
+    wrapped: &[u8],
+    aad: &[u8],
+) -> AppResult<[u8; KEY_LEN]> {
+    if is_legacy_wrap(wrapped) {
+        let iv: &[u8; IV_LEN] = nonce
+            .try_into()
+            .map_err(|_| AppError::internal("stored data key iv is the wrong length"))?;
+        return unwrap_key(kek, iv, wrapped);
+    }
+    if wrapped.len() != KEY_LEN + TAG_LEN {
+        return Err(AppError::internal("stored data key is malformed"));
+    }
+    open_bytes(kek, nonce, wrapped, aad)?
+        .try_into()
+        .map_err(|_| AppError::internal("stored data key is the wrong length"))
+}
+
+pub fn is_legacy_wrap(wrapped: &[u8]) -> bool {
+    wrapped.len() == KEY_LEN
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn seal_all(key: &[u8; KEY_LEN], plain: &[u8], chunk: usize) -> Vec<u8> {
+        let mut sealer = Sealer::new(key);
+        let mut out = Vec::new();
+        for piece in plain.chunks(chunk.max(1)) {
+            out.extend(sealer.push(piece).unwrap());
+        }
+        out.extend(sealer.finish().unwrap());
+        out
+    }
+
+    fn open_range(
+        key: &[u8; KEY_LEN],
+        sealed: &[u8],
+        plain_len: u64,
+        start: u64,
+        end: u64,
+    ) -> AppResult<Vec<u8>> {
+        let range = sealed_range(plain_len, start, end);
+        let slice = &sealed[range.sealed_start as usize..=range.sealed_end_inclusive as usize];
+        let mut opener = Opener::new(key, plain_len, &range);
+        let mut out = Vec::new();
+        for piece in slice.chunks(7919) {
+            out.extend(opener.push(piece)?);
+        }
+        opener.finish()?;
+        Ok(out)
+    }
+
+    fn sample(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    #[test]
+    fn sealing_round_trips_at_every_awkward_length() {
+        let key = random_key();
+        for len in [
+            0,
+            1,
+            SEGMENT_LEN - 1,
+            SEGMENT_LEN,
+            SEGMENT_LEN + 1,
+            3 * SEGMENT_LEN,
+            200_001,
+        ] {
+            let plain = sample(len);
+            let sealed = seal_all(&key, &plain, 4096);
+            assert_eq!(
+                sealed.len() as u64,
+                sealed_len(len as u64),
+                "sealed length for {len}"
+            );
+            if len > 0 {
+                let opened = open_range(&key, &sealed, len as u64, 0, len as u64 - 1).unwrap();
+                assert_eq!(opened, plain, "round trip for {len}");
+            }
+        }
+    }
+
+    #[test]
+    fn sealing_does_not_depend_on_how_the_input_was_chunked() {
+        let key = random_key();
+        let plain = sample(3 * SEGMENT_LEN + 99);
+        let reference = seal_all(&key, &plain, plain.len());
+        for chunk in [1usize, 17, SEGMENT_LEN - 1, SEGMENT_LEN, SEGMENT_LEN + 1] {
+            assert_eq!(seal_all(&key, &plain, chunk), reference, "chunk {chunk}");
+        }
+    }
+
+    #[test]
+    fn any_range_opens_to_the_same_bytes() {
+        let key = random_key();
+        let plain = sample(3 * SEGMENT_LEN + 1234);
+        let sealed = seal_all(&key, &plain, 65_000);
+        let len = plain.len() as u64;
+        let seg = SEGMENT_LEN as u64;
+        for (start, end) in [
+            (0, 0),
+            (5, 5),
+            (seg - 1, seg),
+            (seg, 2 * seg - 1),
+            (100, len - 1),
+            (len - 1, len - 1),
+        ] {
+            assert_eq!(
+                open_range(&key, &sealed, len, start, end).unwrap(),
+                plain[start as usize..=end as usize],
+                "range {start}-{end}"
+            );
+        }
+    }
+
+    #[test]
+    fn slices_sealed_separately_join_into_the_same_object() {
+        let key = random_key();
+        let plain = sample(5 * SEGMENT_LEN + 10);
+        let split = 2 * SEGMENT_LEN;
+
+        let mut first = Sealer::starting_at(&key, 0);
+        let mut joined = first.push(&plain[..split]).unwrap();
+        joined.extend(first.finish_not_last().unwrap());
+        let mut second = Sealer::starting_at(&key, (split / SEGMENT_LEN) as u64);
+        joined.extend(second.push(&plain[split..]).unwrap());
+        joined.extend(second.finish().unwrap());
+
+        assert_eq!(joined, seal_all(&key, &plain, 1000));
+    }
+
+    #[test]
+    fn a_slice_off_a_segment_boundary_cannot_be_left_open() {
+        let mut sealer = Sealer::new(&random_key());
+        sealer.push(&[1, 2, 3]).unwrap();
+        assert!(sealer.finish_not_last().is_err());
+    }
+
+    #[test]
+    fn a_flipped_bit_fails_instead_of_decrypting_wrong() {
+        let key = random_key();
+        let plain = sample(2 * SEGMENT_LEN);
+        let mut sealed = seal_all(&key, &plain, 4096);
+        sealed[10] ^= 1;
+        let len = plain.len() as u64;
+        assert!(open_range(&key, &sealed, len, 0, len - 1).is_err());
+    }
+
+    #[test]
+    fn dropping_the_last_segment_is_detected() {
+        let key = random_key();
+        let plain = sample(2 * SEGMENT_LEN + 5);
+        let sealed = seal_all(&key, &plain, 4096);
+        // a row claiming the file ended after two full segments
+        let shorter = (2 * SEGMENT_LEN) as u64;
+        let truncated = &sealed[..2 * SEALED_SEGMENT_LEN];
+        assert!(open_range(&key, truncated, shorter, 0, shorter - 1).is_err());
+    }
+
+    #[test]
+    fn swapping_segments_is_detected() {
+        let key = random_key();
+        let plain = sample(3 * SEGMENT_LEN);
+        let mut sealed = seal_all(&key, &plain, 4096);
+        let (a, b) = sealed.split_at_mut(SEALED_SEGMENT_LEN);
+        a.swap_with_slice(&mut b[..SEALED_SEGMENT_LEN]);
+        let len = plain.len() as u64;
+        assert!(open_range(&key, &sealed, len, 0, len - 1).is_err());
+    }
+
+    #[test]
+    fn the_wrong_key_fails() {
+        let plain = sample(1000);
+        let sealed = seal_all(&random_key(), &plain, 100);
+        assert!(open_range(&random_key(), &sealed, 1000, 0, 999).is_err());
+    }
+
+    #[test]
+    fn a_content_key_needs_the_user_key_when_there_is_one() {
+        let (dek, salt, user) = (random_key(), random_iv(), random_key());
+        assert_ne!(
+            content_key(&dek, &salt, Some(&user)),
+            content_key(&dek, &salt, None)
+        );
+        assert_ne!(
+            content_key(&dek, &salt, Some(&user)),
+            content_key(&dek, &salt, Some(&random_key()))
+        );
+        assert_eq!(
+            content_key(&dek, &salt, None),
+            content_key(&dek, &salt, None)
+        );
+    }
+
+    #[test]
+    fn a_sealed_key_round_trips_only_under_its_aad() {
+        let (kek, dek) = (random_key(), random_key());
+        let (wrapped, nonce) = seal_key(&kek, &dek, &file_key_aad("f1")).unwrap();
+        assert!(!is_legacy_wrap(&wrapped));
+        assert_eq!(
+            open_key(&kek, &nonce, &wrapped, &file_key_aad("f1")).unwrap(),
+            dek
+        );
+        assert!(open_key(&kek, &nonce, &wrapped, &file_key_aad("f2")).is_err());
+        assert!(open_key(&random_key(), &nonce, &wrapped, &file_key_aad("f1")).is_err());
+    }
+
+    #[test]
+    fn a_legacy_ctr_wrap_still_opens() {
+        let (kek, iv, dek) = (random_key(), random_iv(), random_key());
+        let wrapped = wrap_key(&kek, &iv, &dek).unwrap();
+        assert!(is_legacy_wrap(&wrapped));
+        assert_eq!(
+            open_key(&kek, &iv, &wrapped, &file_key_aad("any")).unwrap(),
+            dek
+        );
+    }
+
+    #[test]
+    fn range_math_points_at_whole_segments() {
+        let seg = SEGMENT_LEN as u64;
+        let plain_len = 3 * seg + 10;
+        let range = sealed_range(plain_len, seg + 3, seg + 7);
+        assert_eq!(range.first_segment, 1);
+        assert_eq!(range.skip, 3);
+        assert_eq!(range.len, 5);
+        assert_eq!(range.sealed_start, SEALED_SEGMENT_LEN as u64);
+        assert_eq!(
+            range.sealed_end_inclusive,
+            2 * SEALED_SEGMENT_LEN as u64 - 1
+        );
+
+        let tail = sealed_range(plain_len, plain_len - 1, plain_len - 1);
+        assert_eq!(tail.sealed_end_inclusive, sealed_len(plain_len) - 1);
+    }
 
     #[test]
     fn round_trips() {

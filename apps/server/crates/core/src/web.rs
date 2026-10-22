@@ -95,6 +95,7 @@ impl ResponseError for ApiError {
             AppError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             AppError::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
             AppError::Gone(_) => StatusCode::GONE,
+            AppError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             AppError::Database(_) | AppError::Io(_) | AppError::Internal { .. } => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }

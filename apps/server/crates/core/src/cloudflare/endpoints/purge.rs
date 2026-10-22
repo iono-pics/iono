@@ -6,7 +6,13 @@ use crate::cloudflare::client::Endpoint;
 
 pub struct PurgeCache<'a> {
     pub zone_id: &'a str,
-    pub files: Vec<String>,
+    pub target: PurgeTarget,
+}
+
+pub enum PurgeTarget {
+    Files(Vec<String>),
+    /// reaches every data center, unlike a worker's cache.delete
+    Tags(Vec<String>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -26,6 +32,9 @@ impl Endpoint for PurgeCache<'_> {
     }
 
     fn body(&self) -> Option<serde_json::Value> {
-        Some(json!({ "files": self.files }))
+        Some(match &self.target {
+            PurgeTarget::Files(files) => json!({ "files": files }),
+            PurgeTarget::Tags(tags) => json!({ "tags": tags }),
+        })
     }
 }

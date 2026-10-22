@@ -24,6 +24,22 @@ pub trait Storage: Send + Sync {
         content_type: &str,
         stream: BoxStream<'static, AppResult<Bytes>>,
     ) -> AppResult<()>;
+    async fn begin_multipart(&self, key: &str, content_type: &str) -> AppResult<String>;
+    /// returns the part's etag, which complete_multipart needs back
+    async fn put_part(
+        &self,
+        key: &str,
+        upload_id: &str,
+        part_number: i32,
+        body: Vec<u8>,
+    ) -> AppResult<String>;
+    async fn complete_multipart(
+        &self,
+        key: &str,
+        upload_id: &str,
+        parts: Vec<(i32, String)>,
+    ) -> AppResult<()>;
+    async fn abort_multipart(&self, key: &str, upload_id: &str) -> AppResult<()>;
     async fn get(&self, key: &str, range: Option<&str>) -> AppResult<StoredObject>;
     async fn delete(&self, key: &str) -> AppResult<()>;
     async fn delete_many(&self, keys: &[String]) -> AppResult<Vec<String>>;

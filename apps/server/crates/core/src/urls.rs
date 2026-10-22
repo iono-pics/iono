@@ -57,66 +57,6 @@ pub async fn short_link_url(db: &PgPool, user_id: &str, key: &str) -> AppResult<
     .map(|(host, prefix)| format!("https://{host}/l/{prefix}{key}")))
 }
 
-pub async fn all_public_urls_for_user(db: &PgPool, user_id: &str) -> AppResult<Vec<String>> {
-    let mut urls = Vec::new();
-
-    let file_names: Vec<String> =
-        sqlx::query_scalar("SELECT display_name FROM files WHERE user_id = $1")
-            .bind(user_id)
-            .fetch_all(db)
-            .await
-            .map_err(AppError::from)?;
-    let name_refs: Vec<&str> = file_names.iter().map(String::as_str).collect();
-    urls.extend(file_urls(db, user_id, &name_refs).await?);
-
-    let paste_keys: Vec<String> = sqlx::query_scalar("SELECT key FROM pastes WHERE user_id = $1")
-        .bind(user_id)
-        .fetch_all(db)
-        .await
-        .map_err(AppError::from)?;
-    if !paste_keys.is_empty() {
-        if let Some((host, prefix)) = resolve_domain(
-            db,
-            user_id,
-            "SELECT d.name, ds.pastes_path_prefix
-             FROM domain_settings ds
-             INNER JOIN domains d ON d.id = ds.pastes_domain_id
-             WHERE ds.user_id = $1",
-        )
-        .await?
-        {
-            for key in &paste_keys {
-                urls.push(format!("https://{host}/p/{prefix}{key}"));
-            }
-        }
-    }
-
-    let link_keys: Vec<String> =
-        sqlx::query_scalar("SELECT key FROM short_links WHERE user_id = $1")
-            .bind(user_id)
-            .fetch_all(db)
-            .await
-            .map_err(AppError::from)?;
-    if !link_keys.is_empty() {
-        if let Some((host, prefix)) = resolve_domain(
-            db,
-            user_id,
-            "SELECT d.name, ds.short_links_path_prefix
-             FROM domain_settings ds
-             INNER JOIN domains d ON d.id = ds.short_links_domain_id
-             WHERE ds.user_id = $1",
-        )
-        .await?
-        {
-            for key in &link_keys {
-                urls.push(format!("https://{host}/l/{prefix}{key}"));
-            }
-        }
-    }
-
-    Ok(urls)
-}
-
 async fn resolve_domain(
     db: &PgPool,
     user_id: &str,
