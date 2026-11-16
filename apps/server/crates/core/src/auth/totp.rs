@@ -63,14 +63,17 @@ pub fn matching_step(secret_base32: &str, code: &str, now_secs: u64) -> AppResul
 }
 
 pub fn verify_totp_code(secret_base32: &str, code: &str) -> Result<bool, AppError> {
-    Ok(matching_step(secret_base32, code, now_secs())?.is_some())
+    Ok(matching_step(secret_base32, code, now_secs()?)?.is_some())
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+fn now_secs() -> AppResult<u64> {
+    epoch_seconds(SystemTime::now())
+}
+
+fn epoch_seconds(time: SystemTime) -> AppResult<u64> {
+    time.duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .map_err(|e| AppError::internal_from("system clock is before the unix epoch", e))
 }
 
 fn secret_aad(user_id: &str) -> Vec<u8> {
@@ -173,7 +176,7 @@ pub async fn accept_code(
     ensure_not_locked(db, user_id).await?;
     let (secret, legacy) = reveal_secret(keyring, user_id, stored_secret)?;
 
-    let accepted = match matching_step(&secret, code, now_secs())? {
+    let accepted = match matching_step(&secret, code, now_secs()?)? {
         Some(step) => {
             sqlx::query(
                 r#"
@@ -212,6 +215,7 @@ pub async fn accept_code(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn keyring() -> Keyring {
         Keyring::new(1, &crypto::encode_key(&crypto::random_key()), "").unwrap()
@@ -249,6 +253,16 @@ mod tests {
         assert_eq!(
             matching_step(&setup.secret_base32, &stale, now).unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn a_clock_before_the_epoch_is_an_error() {
+        let before = UNIX_EPOCH - Duration::from_secs(1);
+        assert!(epoch_seconds(before).is_err());
+        assert_eq!(
+            epoch_seconds(UNIX_EPOCH + Duration::from_secs(90)).unwrap(),
+            90
         );
     }
 
