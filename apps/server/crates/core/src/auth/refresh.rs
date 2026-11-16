@@ -131,11 +131,19 @@ pub async fn rotate(
         .await?;
         tx.commit().await?;
 
-        tracing::warn!(
-            user_id = %row.user_id,
-            family_id = %row.family_id,
-            "refresh token replay detected, session revoked"
-        );
+        if row.revoked_at.is_some() {
+            tracing::info!(
+                user_id = %row.user_id,
+                family_id = %row.family_id,
+                "revoked refresh token presented"
+            );
+        } else {
+            tracing::warn!(
+                user_id = %row.user_id,
+                family_id = %row.family_id,
+                "refresh token replay detected, session revoked"
+            );
+        }
         return Err(AppError::Unauthorized);
     }
 
