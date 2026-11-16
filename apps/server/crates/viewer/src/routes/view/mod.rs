@@ -53,11 +53,16 @@ async fn view_page_inner(
     let nonce = csp::Nonce::new();
     let html = embed::render_embed_html(&file, &uploader, &raw_url, preset.as_ref(), &nonce);
 
-    Ok(HttpResponse::Ok()
+    let mut response = HttpResponse::Ok();
+    response
         .content_type(header::ContentType::html())
         .append_header((header::X_CONTENT_TYPE_OPTIONS, "nosniff"))
-        .append_header(csp::header(&csp::view_policy(&nonce)))
-        .body(html))
+        .append_header(csp::header(&csp::view_policy(&nonce)));
+    if is_protected(&file) {
+        // the media urls in the page carry the password and key
+        response.append_header(header::CacheControl(vec![header::CacheDirective::NoStore]));
+    }
+    Ok(response.body(html))
 }
 
 async fn raw_file_inner(
@@ -276,7 +281,11 @@ async fn legacy_body(
     user_key: Option<&str>,
     range: Option<&str>,
 ) -> Result<Body, AppError> {
-    let object = state.storage.get(&file.original_name, range).await?;
+    let storage_range = legacy_storage_range(range, file.size_bytes as u64)?;
+    let object = state
+        .storage
+        .get(&file.original_name, storage_range.as_deref())
+        .await?;
     let offset = object
         .content_range
         .as_deref()
@@ -288,6 +297,16 @@ async fn legacy_body(
         content_range: object.content_range,
         content_length: object.content_length,
     })
+}
+
+/// the range storage is asked for, parsed the same way as for sealed files so
+/// the client's header is never forwarded as written
+fn legacy_storage_range(range: Option<&str>, size: u64) -> Result<Option<String>, AppError> {
+    match range.map(|r| parse_range(r, size)) {
+        None | Some(RangeRequest::Whole) => Ok(None),
+        Some(RangeRequest::Unsatisfiable) => Err(AppError::RangeNotSatisfiable),
+        Some(RangeRequest::Bytes(start, end)) => Ok(Some(format!("bytes={start}-{end}"))),
+    }
 }
 
 fn range_start(content_range: &str) -> Option<u64> {
@@ -400,9 +419,12 @@ fn decrypting_stream(
     }))
 }
 
+fn is_protected(file: &File) -> bool {
+    file.password_hash.is_some() || file.user_key_hash.is_some()
+}
+
 fn cache_control(ages: cache::MaxAges, file: &File) -> header::CacheControl {
-    let secret = file.password_hash.is_some() || file.user_key_hash.is_some();
-    cache::cache_control(ages, file.expires_at, secret)
+    cache::cache_control(ages, file.expires_at, is_protected(file))
 }
 
 async fn fetch_file(state: &AppState, display_name: &str) -> Result<File, AppError> {
@@ -558,6 +580,53 @@ mod tests {
         assert_eq!(parse_range("items=0-1", 1000), RangeRequest::Whole);
         assert_eq!(parse_range("bytes=9-3", 1000), RangeRequest::Whole);
         assert_eq!(parse_range("bytes=x-3", 1000), RangeRequest::Whole);
+    }
+
+    fn file_with(password_hash: Option<&str>, user_key_hash: Option<&str>) -> File {
+        File {
+            id: "f1".into(),
+            user_id: "u1".into(),
+            folder_id: None,
+            display_name: "abc.png".into(),
+            original_name: "key.png".into(),
+            content_type: "image/png".into(),
+            size_bytes: 10,
+            password_hash: password_hash.map(Into::into),
+            expires_at: None,
+            is_favourite: false,
+            encrypted: false,
+            encryption_iv: None,
+            user_key_iv: None,
+            user_key_hash: user_key_hash.map(Into::into),
+            encryption_key_version: None,
+            wrapped_dek: None,
+            dek_iv: None,
+            encryption_format: 1,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn files_with_a_password_or_key_are_protected() {
+        assert!(is_protected(&file_with(Some("hash"), None)));
+        assert!(is_protected(&file_with(None, Some("hash"))));
+        assert!(!is_protected(&file_with(None, None)));
+    }
+
+    #[test]
+    fn legacy_ranges_are_normalised_before_storage_sees_them() {
+        let range = |header: &str| legacy_storage_range(Some(header), 1000).unwrap();
+
+        assert_eq!(range("bytes=-100").as_deref(), Some("bytes=900-999"));
+        assert_eq!(range("bytes=500-").as_deref(), Some("bytes=500-999"));
+        assert_eq!(range("bytes=0-99").as_deref(), Some("bytes=0-99"));
+        assert_eq!(range("bytes=0-1,5-6"), None);
+        assert_eq!(range("items=0-1"), None);
+        assert_eq!(legacy_storage_range(None, 1000).unwrap(), None);
+        assert!(matches!(
+            legacy_storage_range(Some("bytes=1000-"), 1000),
+            Err(AppError::RangeNotSatisfiable)
+        ));
     }
 
     #[sqlx::test(migrations = "../../migrations")]

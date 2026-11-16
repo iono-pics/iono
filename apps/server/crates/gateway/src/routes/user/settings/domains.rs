@@ -90,8 +90,10 @@ fn validate_prefix(value: &str) -> Result<(), AppError> {
         ));
     }
 
-    if value == "raw" {
-        return Err(AppError::BadRequest("path prefix 'raw' is reserved".into()));
+    if matches!(value, "raw" | "p" | "l") {
+        return Err(AppError::BadRequest(format!(
+            "path prefix '{value}' is reserved"
+        )));
     }
     Ok(())
 }
@@ -194,4 +196,19 @@ pub async fn update_domain_settings(
     }
 
     Ok(HttpResponse::Ok().json(DomainSettingsResponse::from(settings)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefixes_that_collide_with_viewer_routes_are_reserved() {
+        for prefix in ["raw", "p", "l"] {
+            assert!(validate_prefix(prefix).is_err(), "{prefix}");
+        }
+        for prefix in ["pics", "my-files", "P", "a1"] {
+            assert!(validate_prefix(prefix).is_ok(), "{prefix}");
+        }
+    }
 }

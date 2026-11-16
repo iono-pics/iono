@@ -22,10 +22,12 @@ async fn main() -> std::io::Result<()> {
 
     let state = web::Data::new(state);
     let governor = routes::rate_limit::ingest_governor(&config, config.jwt_secret.expose_secret());
+    let parts_governor = routes::rate_limit::parts_governor();
     let proxies = web::Data::new(config.trusted_proxies.clone());
 
     HttpServer::new(move || {
         let governor = governor.clone();
+        let parts_governor = parts_governor.clone();
         let cors = iono_core::web::cors(&config, [Method::POST, Method::PUT, Method::DELETE]);
         App::new()
             .wrap(cors)
@@ -36,7 +38,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(proxies.clone())
             .app_data(iono_core::web::json_config(&config))
             .app_data(iono_core::web::payload_config(&config))
-            .configure(move |cfg| routes::configure(cfg, &governor))
+            .configure(move |cfg| routes::configure(cfg, &governor, &parts_governor))
     })
     .client_request_timeout(iono_core::web::CLIENT_REQUEST_TIMEOUT)
     .client_disconnect_timeout(iono_core::web::CLIENT_DISCONNECT_TIMEOUT)

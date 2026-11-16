@@ -5,7 +5,7 @@ use actix_web::{
     web, HttpRequest,
 };
 use sha2::{Digest, Sha256};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
 
 use crate::auth::jwt;
@@ -22,6 +22,15 @@ pub fn client_ip(req: &ServiceRequest) -> Option<IpAddr> {
 pub fn request_ip(req: &HttpRequest) -> Option<IpAddr> {
     let proxies = req.app_data::<web::Data<TrustedProxies>>();
     ip_from(req.headers(), req.peer_addr(), proxies.map(|p| p.get_ref()))
+}
+
+/// the address limits are counted against. one ipv6 client usually controls a
+/// whole /64, so its addresses share a budget
+pub fn network_bucket(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from(u128::from(v6) & (u128::MAX << 64))),
+        v4 => v4,
+    }
 }
 
 fn ip_from(
@@ -238,5 +247,21 @@ mod tests {
         let key = key(behind_proxy().insert_header(("cf-connecting-ip", "9.9.9.9")));
 
         assert_eq!(key, "i:9.9.9.9");
+    }
+
+    #[test]
+    fn addresses_in_one_ipv6_64_share_a_bucket() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+
+        assert_eq!(
+            network_bucket(ip("2001:db8:1:2::1")),
+            network_bucket(ip("2001:db8:1:2:ffff::9"))
+        );
+        assert_ne!(
+            network_bucket(ip("2001:db8:1:2::1")),
+            network_bucket(ip("2001:db8:1:3::1"))
+        );
+        assert_eq!(network_bucket(ip("203.0.113.7")), ip("203.0.113.7"));
+        assert_eq!(network_bucket(ip("::ffff:203.0.113.7")), ip("203.0.113.7"));
     }
 }

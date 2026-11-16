@@ -3,12 +3,15 @@
 //! s3 multipart upload. every part is encrypted at its own byte offset, so the
 //! stored object is identical to what a single streamed upload would write
 
-use actix_web::{delete, post, put, web, HttpResponse};
+use actix_web::{delete, error::PayloadError, post, web, HttpResponse};
+use bytes::Bytes;
 use chrono::{DateTime, Duration, Utc};
-use futures_util::StreamExt;
-use iono_core::{content_type, crypto, quota, AppError};
+use futures_util::{Stream, StreamExt};
+use iono_core::{content_type, crypto, quota, validators, AppError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex, PoisonError};
+use tokio::sync::{Semaphore, SemaphorePermit};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -16,7 +19,9 @@ use iono_core::web::ApiResult;
 
 use crate::{
     auth::ApiKeyUser,
-    routes::upload::{finalize, user_settings, Budget, Uploaded, UserKey, SNIFF_BYTES},
+    routes::upload::{
+        finalize, user_settings, Budget, Claim, Uploaded, UserKey, BODY_IDLE_TIMEOUT, SNIFF_BYTES,
+    },
     state::AppState,
 };
 
@@ -28,6 +33,58 @@ const _: () = assert!((PART_SIZE as usize).is_multiple_of(crypto::SEGMENT_LEN));
 const SESSION_TTL_HOURS: i64 = 24;
 // objects are ciphertext, the real type lives on the files row
 const OBJECT_CONTENT_TYPE: &str = "application/octet-stream";
+// a part body is buffered whole, so how many are in flight caps the memory they hold
+const MAX_PARTS_IN_FLIGHT: usize = 16;
+const MAX_PARTS_PER_USER: usize = 4;
+// longest one part may take to arrive
+const PART_BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const RETRY_WHEN_BUSY: std::time::Duration = std::time::Duration::from_secs(5);
+
+static PART_SLOTS: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(MAX_PARTS_IN_FLIGHT));
+static USER_PARTS: LazyLock<Mutex<HashMap<String, usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// one part upload in progress. dropping it frees its global and per user slot
+struct PartSlot {
+    _permit: SemaphorePermit<'static>,
+    user_id: String,
+}
+
+impl PartSlot {
+    /// refuses with a retry hint instead of queueing, so waiting clients do not
+    /// hold connections
+    fn acquire(user_id: &str) -> Result<Self, AppError> {
+        let busy = || AppError::rate_limited(RETRY_WHEN_BUSY);
+        let permit = PART_SLOTS.try_acquire().map_err(|_| busy())?;
+        let mut active = lock_user_parts();
+        let count = active.entry(user_id.to_owned()).or_insert(0);
+        if *count >= MAX_PARTS_PER_USER {
+            return Err(busy());
+        }
+        *count += 1;
+        Ok(Self {
+            _permit: permit,
+            user_id: user_id.to_owned(),
+        })
+    }
+}
+
+impl Drop for PartSlot {
+    fn drop(&mut self) {
+        let mut active = lock_user_parts();
+        if let Some(count) = active.get_mut(&self.user_id) {
+            *count -= 1;
+            if *count == 0 {
+                active.remove(&self.user_id);
+            }
+        }
+    }
+}
+
+// the map holds only counters, so a poisoned lock is still safe to use
+fn lock_user_parts() -> std::sync::MutexGuard<'static, HashMap<String, usize>> {
+    USER_PARTS.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateUploadSessionRequest {
@@ -273,12 +330,11 @@ pub async fn create_upload_session(
         (status = 404, description = "no such session, or it expired")
     )
 )]
-#[put("/uploads/{id}/parts/{part_number}")]
 pub async fn upload_part(
     state: web::Data<AppState>,
     user: ApiKeyUser,
     path: web::Path<(String, i64)>,
-    mut payload: web::Payload,
+    payload: web::Payload,
 ) -> ApiResult<HttpResponse> {
     let (id, part_number) = path.into_inner();
     let session = fetch_session(&state, &user.0.id, &id).await?;
@@ -291,23 +347,9 @@ pub async fn upload_part(
         .into());
     }
 
+    let _slot = PartSlot::acquire(&user.0.id)?;
     let expected = session.expected_part_len(part_number) as usize;
-    let mut buf = Vec::with_capacity(expected);
-    while let Some(chunk) = payload.next().await {
-        let chunk = chunk.map_err(|e| AppError::BadRequest(format!("malformed body: {e}")))?;
-        if buf.len() + chunk.len() > expected {
-            return Err(AppError::BadRequest(format!(
-                "part {part_number} must be {expected} bytes"
-            ))
-            .into());
-        }
-        buf.extend_from_slice(&chunk);
-    }
-    if buf.len() != expected {
-        return Err(
-            AppError::BadRequest(format!("part {part_number} must be {expected} bytes")).into(),
-        );
-    }
+    let buf = read_part(payload, expected, part_number).await?;
 
     let sniffed = (part_number == 1).then(|| {
         sniff(
@@ -360,6 +402,43 @@ pub async fn upload_part(
     Ok(HttpResponse::NoContent().finish())
 }
 
+/// reads a part body of exactly `expected` bytes. the buffer grows with the
+/// body, a stalled client is cut off after `BODY_IDLE_TIMEOUT` and the whole
+/// part must arrive within `PART_BODY_TIMEOUT`
+async fn read_part<S>(
+    mut payload: S,
+    expected: usize,
+    part_number: i64,
+) -> Result<Vec<u8>, AppError>
+where
+    S: Stream<Item = Result<Bytes, PayloadError>> + Unpin,
+{
+    let wrong_length =
+        || AppError::BadRequest(format!("part {part_number} must be {expected} bytes"));
+    let read = async {
+        let mut buf = Vec::new();
+        loop {
+            let next = tokio::time::timeout(BODY_IDLE_TIMEOUT, payload.next())
+                .await
+                .map_err(|_| AppError::BadRequest("upload stalled".into()))?;
+            let Some(chunk) = next else { break };
+            let chunk = chunk.map_err(|e| AppError::BadRequest(format!("malformed body: {e}")))?;
+            if buf.len() + chunk.len() > expected {
+                return Err(wrong_length());
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        Ok(buf)
+    };
+    let buf = tokio::time::timeout(PART_BODY_TIMEOUT, read)
+        .await
+        .map_err(|_| AppError::BadRequest("part upload took too long".into()))??;
+    if buf.len() != expected {
+        return Err(wrong_length());
+    }
+    Ok(buf)
+}
+
 #[utoipa::path(
     post,
     path = "/uploads/{id}/complete",
@@ -383,22 +462,11 @@ pub async fn complete_upload_session(
 ) -> ApiResult<HttpResponse> {
     let id = path.into_inner();
     let body = body.map(web::Json::into_inner).unwrap_or_default();
+    if let Some(password) = body.password.as_deref() {
+        validators::password(password, 256)?;
+    }
 
-    // the row lock makes a double complete wait, then find no session
-    let mut tx = state.db.begin().await.map_err(AppError::from)?;
-    let session = sqlx::query_as::<_, Session>(
-        r#"
-        SELECT * FROM upload_sessions
-        WHERE id = $1 AND user_id = $2 AND expires_at > now()
-        FOR UPDATE
-        "#,
-    )
-    .bind(&id)
-    .bind(&user.0.id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(AppError::from)?
-    .ok_or(AppError::NotFound)?;
+    let session = fetch_session(&state, &user.0.id, &id).await?;
 
     let mut parts = Vec::with_capacity(session.part_count() as usize);
     let mut missing = Vec::new();
@@ -417,6 +485,12 @@ pub async fn complete_upload_session(
     // no quota check here, the session has counted against it since creation
     let settings = user_settings(&state, &user.0.id).await?;
 
+    // completing the multipart upload cannot be undone, so everything that can
+    // fail on the stored session is read first
+    let encryption_iv = iv(&session.encryption_iv)?;
+    let dek = session.dek(&state)?;
+    let user_key = session.user_key(&state)?;
+
     state
         .storage
         .complete_multipart(&session.s3_key, &session.s3_upload_id, parts)
@@ -428,19 +502,20 @@ pub async fn complete_upload_session(
             .clone()
             .unwrap_or_else(|| content_type::FALLBACK_MIME_TYPE.to_string()),
         size_bytes: session.size_bytes,
-        encryption_iv: iv(&session.encryption_iv)?,
-        dek: session.dek(&state)?,
-        user_key: session.user_key(&state)?,
+        encryption_iv,
+        dek,
+        user_key,
         s3_key: session.s3_key,
     };
-    let url = finalize(&state, &user.0.id, &settings, uploaded, body.password, None).await?;
-
-    sqlx::query("DELETE FROM upload_sessions WHERE id = $1")
-        .bind(&id)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::from)?;
-    tx.commit().await.map_err(AppError::from)?;
+    let url = finalize(
+        &state,
+        &user.0.id,
+        &settings,
+        uploaded,
+        body.password,
+        Claim::Session(id),
+    )
+    .await?;
 
     Ok(HttpResponse::Created().json(serde_json::json!({ "url": url })))
 }
@@ -492,6 +567,32 @@ mod tests {
             )
             .unwrap();
         bytes
+    }
+
+    #[test]
+    fn one_user_cannot_hold_every_slot() {
+        let held: Vec<_> = (0..MAX_PARTS_PER_USER)
+            .map(|_| PartSlot::acquire("slot-test-hog").unwrap())
+            .collect();
+        assert!(matches!(
+            PartSlot::acquire("slot-test-hog"),
+            Err(AppError::RateLimited { .. })
+        ));
+        assert!(PartSlot::acquire("slot-test-other").is_ok());
+
+        drop(held);
+        assert!(PartSlot::acquire("slot-test-hog").is_ok());
+    }
+
+    #[actix_web::test]
+    async fn a_part_must_be_exactly_the_expected_length() {
+        for (len, accepted) in [(10usize, true), (9, false), (11, false), (0, false)] {
+            let (_req, payload) = actix_web::test::TestRequest::default()
+                .set_payload(vec![0u8; len])
+                .to_http_parts();
+            let result = read_part(payload, 10, 1).await;
+            assert_eq!(result.is_ok(), accepted, "length {len}");
+        }
     }
 
     #[test]

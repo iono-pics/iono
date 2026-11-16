@@ -1,11 +1,12 @@
 use actix_governor::governor::clock::Clock;
 use actix_governor::governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use sha2::{Digest, Sha256};
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::IpAddr;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
 use crate::error::AppError;
+use crate::rate_limit::network_bucket;
 
 const BURST: u32 = 10;
 const REPLENISH_EVERY: Duration = Duration::from_secs(10);
@@ -53,21 +54,9 @@ fn key(identifier: &str, client: Option<IpAddr>) -> [u8; 32] {
     hasher.update(identifier.trim().to_lowercase().as_bytes());
     hasher.update([0]);
     if let Some(ip) = client {
-        hasher.update(bucket(ip).to_string().as_bytes());
+        hasher.update(network_bucket(ip).to_string().as_bytes());
     }
     hasher.finalize().into()
-}
-
-/// one client usually controls a whole /64, so keying on the exact ipv6
-/// address would let it rotate addresses for a fresh budget every attempt
-fn bucket(ip: IpAddr) -> IpAddr {
-    match ip.to_canonical() {
-        IpAddr::V6(v6) => {
-            let masked = u128::from(v6) & (u128::MAX << 64);
-            IpAddr::V6(Ipv6Addr::from(masked))
-        }
-        v4 => v4,
-    }
 }
 
 #[cfg(test)]

@@ -1,3 +1,4 @@
+use actix_web::http::Uri;
 use chrono::{DateTime, Utc};
 
 use crate::error::AppError;
@@ -31,10 +32,19 @@ pub fn http_url(value: &str, max_len: usize) -> Result<(), AppError> {
         )));
     }
     no_nul(value, "URL")?;
-    if !value.starts_with("http://") && !value.starts_with("https://") {
-        return Err(AppError::BadRequest(
-            "URL must start with http:// or https://".into(),
-        ));
+    let invalid = || AppError::BadRequest("URL must be an http:// or https:// address".into());
+    if !value.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err(invalid());
+    }
+    let uri: Uri = value.parse().map_err(|_| invalid())?;
+    let has_credentials = uri
+        .authority()
+        .is_some_and(|authority| authority.as_str().contains('@'));
+    if !matches!(uri.scheme_str(), Some("http" | "https"))
+        || uri.host().is_none()
+        || has_credentials
+    {
+        return Err(invalid());
     }
     Ok(())
 }
@@ -74,4 +84,50 @@ pub fn hex_color(value: &str) -> Result<(), AppError> {
         return Err(AppError::BadRequest("color must be #RRGGBB".into()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_http_and_https_urls_are_accepted() {
+        for url in [
+            "http://example.com",
+            "https://example.com/a/b?c=d#e",
+            "https://example.com:8443/x",
+            "https://[2001:db8::1]/x",
+            "https://example.com/%E2%9C%93",
+        ] {
+            assert!(http_url(url, 2048).is_ok(), "{url}");
+        }
+    }
+
+    #[test]
+    fn malformed_or_unsafe_urls_are_rejected() {
+        for url in [
+            "",
+            "example.com",
+            "//example.com",
+            "ftp://example.com",
+            "javascript:alert(1)",
+            "https://",
+            "https://user:pass@example.com",
+            "https://user@example.com",
+            "https://exa mple.com",
+            "https://example.com/a b",
+            "https://example.com/#frag\nment",
+            "https://example.com/\u{e9}",
+            "https://example.com/\r\nSet-Cookie: a=b",
+        ] {
+            assert!(http_url(url, 2048).is_err(), "{url:?}");
+        }
+    }
+
+    #[test]
+    fn long_urls_and_nul_bytes_are_rejected() {
+        let long = format!("https://example.com/{}", "a".repeat(2048));
+        assert!(http_url(&long, 2048).is_err());
+        assert!(http_url("https://example.com/\0", 2048).is_err());
+    }
 }

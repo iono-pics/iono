@@ -5,10 +5,12 @@
 
 use actix_governor::governor::clock::Clock;
 use actix_governor::governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
+use iono_core::rate_limit::network_bucket;
 use iono_core::AppError;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::future::Future;
+use std::hash::Hash;
 use std::net::IpAddr;
 use std::num::NonZeroU32;
 use std::sync::Mutex;
@@ -18,20 +20,27 @@ const REMEMBER_FOR: Duration = Duration::from_secs(10 * 60);
 const MAX_REMEMBERED: usize = 50_000;
 const SLOW_CHECKS_BURST: u32 = 30;
 const SLOW_CHECK_EVERY: Duration = Duration::from_secs(2);
+const RESOURCE_CHECKS_BURST: u32 = 60;
+const RESOURCE_CHECK_EVERY: Duration = Duration::from_secs(1);
+const PRUNE_ABOVE: usize = 100_000;
 
 pub struct Unlocker {
     verified: Mutex<HashMap<[u8; 32], Instant>>,
+    /// slow checks per client network
     limiter: DefaultKeyedRateLimiter<IpAddr>,
+    /// slow checks per protected resource, across every client
+    resource_limiter: DefaultKeyedRateLimiter<String>,
 }
 
 impl Default for Unlocker {
     fn default() -> Self {
-        let quota = Quota::with_period(SLOW_CHECK_EVERY)
-            .expect("slow check period is not zero")
-            .allow_burst(NonZeroU32::new(SLOW_CHECKS_BURST).expect("burst is not zero"));
         Self {
             verified: Mutex::new(HashMap::new()),
-            limiter: RateLimiter::keyed(quota),
+            limiter: RateLimiter::keyed(quota(SLOW_CHECK_EVERY, SLOW_CHECKS_BURST)),
+            resource_limiter: RateLimiter::keyed(quota(
+                RESOURCE_CHECK_EVERY,
+                RESOURCE_CHECKS_BURST,
+            )),
         }
     }
 }
@@ -57,11 +66,18 @@ impl Unlocker {
         }
 
         if let Some(ip) = client {
-            if let Err(refused) = self.limiter.check_key(&ip) {
+            prune(&self.limiter);
+            if let Err(refused) = self.limiter.check_key(&network_bucket(ip)) {
                 return Err(AppError::rate_limited(
                     refused.wait_time_from(self.limiter.clock().now()),
                 ));
             }
+        }
+        prune(&self.resource_limiter);
+        if let Err(refused) = self.resource_limiter.check_key(&resource_id.to_owned()) {
+            return Err(AppError::rate_limited(
+                refused.wait_time_from(self.resource_limiter.clock().now()),
+            ));
         }
 
         let ok = slow_check().await?;
@@ -98,6 +114,20 @@ impl Unlocker {
             }
         }
         verified.insert(key, now + REMEMBER_FOR);
+    }
+}
+
+fn quota(every: Duration, burst: u32) -> Quota {
+    Quota::with_period(every)
+        .unwrap_or_else(|| Quota::per_minute(NonZeroU32::MIN))
+        .allow_burst(NonZeroU32::new(burst).unwrap_or(NonZeroU32::MIN))
+}
+
+/// keeps a limiter's memory bounded when many distinct keys have been seen
+fn prune<K: Hash + Eq + Clone>(limiter: &DefaultKeyedRateLimiter<K>) {
+    if limiter.len() > PRUNE_ABOVE {
+        limiter.retain_recent();
+        limiter.shrink_to_fit();
     }
 }
 
@@ -182,6 +212,74 @@ mod tests {
             }
         }
         assert!(limited, "guesses were never limited");
+    }
+
+    #[tokio::test]
+    async fn an_ipv6_client_cannot_dodge_the_limit_by_changing_address() {
+        let unlocker = Unlocker::default();
+        let mut limited = false;
+        for i in 0..SLOW_CHECKS_BURST + 5 {
+            let ip: IpAddr = format!("2001:db8:1:2::{i:x}").parse().unwrap();
+            let result = unlocker
+                .check(Some(ip), "f1", "hash", &format!("guess{i}"), || async {
+                    Ok(false)
+                })
+                .await;
+            if matches!(result, Err(AppError::RateLimited { .. })) {
+                limited = true;
+                break;
+            }
+        }
+        assert!(limited, "rotating addresses in one /64 was never limited");
+    }
+
+    #[tokio::test]
+    async fn guessing_one_resource_is_limited_across_clients() {
+        let unlocker = Unlocker::default();
+        let mut limited = false;
+        for i in 0..RESOURCE_CHECKS_BURST + 5 {
+            let ip = IpAddr::V4(std::net::Ipv4Addr::new(
+                10,
+                0,
+                (i / 200) as u8,
+                (i % 200) as u8 + 1,
+            ));
+            let result = unlocker
+                .check(Some(ip), "f1", "hash", &format!("guess{i}"), || async {
+                    Ok(false)
+                })
+                .await;
+            if matches!(result, Err(AppError::RateLimited { .. })) {
+                limited = true;
+                break;
+            }
+        }
+        assert!(
+            limited,
+            "distributed guesses at one file were never limited"
+        );
+    }
+
+    #[tokio::test]
+    async fn limits_on_one_resource_do_not_block_another() {
+        let unlocker = Unlocker::default();
+        for i in 0..RESOURCE_CHECKS_BURST + 5 {
+            let ip = IpAddr::V4(std::net::Ipv4Addr::new(
+                10,
+                0,
+                (i / 200) as u8,
+                (i % 200) as u8 + 1,
+            ));
+            let _ = unlocker
+                .check(Some(ip), "f1", "hash", &format!("guess{i}"), || async {
+                    Ok(false)
+                })
+                .await;
+        }
+        let other = unlocker
+            .check(IP, "f2", "hash", "pw", || async { Ok(true) })
+            .await;
+        assert!(matches!(other, Ok(true)));
     }
 
     #[test]

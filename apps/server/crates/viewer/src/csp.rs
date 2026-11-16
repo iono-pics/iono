@@ -1,4 +1,4 @@
-use actix_web::http::header::{HeaderName, HeaderValue, CONTENT_SECURITY_POLICY};
+use actix_web::http::header::{HeaderName, CONTENT_SECURITY_POLICY};
 use iono_core::crypto;
 
 pub struct Nonce(String);
@@ -34,11 +34,8 @@ pub fn raw_policy() -> &'static str {
     "default-src 'none'; sandbox"
 }
 
-pub fn header(policy: &str) -> (HeaderName, HeaderValue) {
-    (
-        CONTENT_SECURITY_POLICY,
-        HeaderValue::from_str(policy).expect("csp policy is not a valid header value"),
-    )
+pub fn header(policy: &str) -> (HeaderName, String) {
+    (CONTENT_SECURITY_POLICY, policy.to_owned())
 }
 
 #[cfg(test)]
@@ -108,9 +105,17 @@ mod tests {
 
     #[test]
     fn policies_are_valid_header_values() {
+        use actix_web::http::header::HeaderValue;
+
         let nonce = Nonce::new();
-        header(&paste_policy(Some(&nonce)));
-        header(&view_policy(&nonce));
-        header(raw_policy());
+        for policy in [
+            paste_policy(Some(&nonce)),
+            view_policy(&nonce),
+            raw_policy().to_owned(),
+        ] {
+            let (name, value) = header(&policy);
+            assert_eq!(name, CONTENT_SECURITY_POLICY);
+            assert!(HeaderValue::from_str(&value).is_ok(), "{policy}");
+        }
     }
 }

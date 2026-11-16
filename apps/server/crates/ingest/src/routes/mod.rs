@@ -9,7 +9,7 @@ use actix_web::{get, web};
 use iono_core::openapi::BearerSecurity;
 use utoipa::OpenApi;
 
-use crate::routes::rate_limit::IngestGovernor;
+use crate::routes::rate_limit::{IngestGovernor, PartsGovernor};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -40,11 +40,19 @@ async fn openapi_spec() -> web::Json<utoipa::openapi::OpenApi> {
     web::Json(ApiDoc::openapi())
 }
 
-pub fn configure(cfg: &mut web::ServiceConfig, governor: &IngestGovernor) {
-    // parts skip the governor, a 10GB file is 640 of them and each is already
-    // bounded by a session the governed create call had to open
+pub fn configure(
+    cfg: &mut web::ServiceConfig,
+    governor: &IngestGovernor,
+    parts_governor: &PartsGovernor,
+) {
+    // a 10GB file is 640 parts, so they use an address limiter with a high
+    // rate. each is bounded by a session the governed create call had to open
     cfg.service(openapi_spec)
-        .service(upload_session::upload_part)
+        .service(
+            web::resource("/uploads/{id}/parts/{part_number}")
+                .wrap(Governor::new(parts_governor))
+                .route(web::put().to(upload_session::upload_part)),
+        )
         .service(
             web::scope("")
                 .wrap(Governor::new(governor))

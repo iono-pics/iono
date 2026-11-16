@@ -9,6 +9,7 @@ use iono_core::{
         token,
     },
     content_type, crypto,
+    deletion::{self, Pending},
     entities::{File, Plan, UserSettings},
     image_compress, quota, validators, AppError,
 };
@@ -30,7 +31,11 @@ const RESERVATION_TTL: Duration = Duration::hours(1);
 const MAX_TEXT_FIELD_BYTES: usize = 8192;
 const MAX_FORM_FIELDS: usize = 8;
 // longest the client may go without sending the next chunk
-const BODY_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const BODY_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+// longest one upload request may take, larger files use chunked uploads
+const MAX_UPLOAD_DURATION: std::time::Duration = std::time::Duration::from_secs(2 * 60 * 60);
+// unexpected form fields are read and discarded, up to this many bytes in all
+const MAX_IGNORED_BYTES: usize = 64 * 1024;
 const CHANNEL_DEPTH: usize = 4;
 const PUMP_CHUNK: usize = 256 * 1024;
 
@@ -63,7 +68,7 @@ pub async fn upload_file(
     state: web::Data<AppState>,
     user: ApiKeyUser,
     req: HttpRequest,
-    mut payload: Multipart,
+    payload: Multipart,
 ) -> ApiResult<HttpResponse> {
     let settings = user_settings(&state, &user.0.id).await?;
 
@@ -87,37 +92,14 @@ pub async fn upload_file(
     let mut budget = decided.ok_or_else(|| AppError::internal("quota was not decided"))?;
     budget.limit = reservation.bytes as u64;
 
-    let mut plain_password: Option<String> = None;
-    let mut uploaded: Option<Uploaded> = None;
+    let form = tokio::time::timeout(
+        MAX_UPLOAD_DURATION,
+        read_form(&state, payload, &budget, &settings),
+    )
+    .await
+    .map_err(|_| AppError::BadRequest("upload took too long".into()))??;
 
-    let mut field_count = 0usize;
-    while let Some(field) = within_idle_timeout(payload.try_next()).await? {
-        field_count += 1;
-        if field_count > MAX_FORM_FIELDS {
-            return Err(AppError::BadRequest("too many form fields".into()).into());
-        }
-        match field.name() {
-            Some("password") => {
-                let text = read_text_field(field).await?;
-                plain_password = Some(text).filter(|p| !p.is_empty());
-            }
-            Some("file") if uploaded.is_none() => {
-                uploaded = Some(
-                    store_field(
-                        &state,
-                        field,
-                        &budget,
-                        settings.encrypt_uploads,
-                        settings.lossless_images,
-                    )
-                    .await?,
-                );
-            }
-            _ => drain_field(field).await?,
-        }
-    }
-
-    let Some(uploaded) = uploaded else {
+    let Some(uploaded) = form.uploaded else {
         return Err(AppError::BadRequest("missing file".into()).into());
     };
 
@@ -126,11 +108,56 @@ pub async fn upload_file(
         &user.0.id,
         &settings,
         uploaded,
-        plain_password,
-        Some(reservation),
+        form.password,
+        Claim::Reservation(reservation),
     )
     .await?;
     Ok(HttpResponse::Created().json(serde_json::json!({ "url": url })))
+}
+
+struct Form {
+    password: Option<String>,
+    uploaded: Option<Uploaded>,
+}
+
+async fn read_form(
+    state: &AppState,
+    mut payload: Multipart,
+    budget: &Budget,
+    settings: &UserSettings,
+) -> Result<Form, AppError> {
+    let mut form = Form {
+        password: None,
+        uploaded: None,
+    };
+    let mut field_count = 0usize;
+    let mut ignored = 0usize;
+    while let Some(field) = within_idle_timeout(payload.try_next()).await? {
+        field_count += 1;
+        if field_count > MAX_FORM_FIELDS {
+            return Err(AppError::BadRequest("too many form fields".into()));
+        }
+        match field.name() {
+            Some("password") => {
+                let text = read_text_field(field).await?;
+                form.password = Some(text).filter(|p| !p.is_empty());
+            }
+            Some("file") if form.uploaded.is_none() => {
+                form.uploaded = Some(
+                    store_field(
+                        state,
+                        field,
+                        budget,
+                        settings.encrypt_uploads,
+                        settings.lossless_images,
+                    )
+                    .await?,
+                );
+            }
+            _ => drain_field(field, &mut ignored).await?,
+        }
+    }
+    Ok(form)
 }
 
 pub(crate) async fn user_settings(
@@ -145,20 +172,77 @@ pub(crate) async fn user_settings(
         .ok_or_else(|| AppError::internal("user has no settings configured"))
 }
 
-/// writes the files row for an object already in storage and builds its share url
+/// what an upload counts against until its row exists
+pub(crate) enum Claim {
+    /// bytes reserved for a single streamed upload
+    Reservation(quota::Reservation),
+    /// the chunked upload session being completed
+    Session(String),
+}
+
+/// writes the files row for an object already in storage and builds its share
+/// url. a chunked upload whose row cannot be written has its object queued for
+/// deletion and its session dropped
 pub(crate) async fn finalize(
     state: &AppState,
     user_id: &str,
     settings: &UserSettings,
     uploaded: Uploaded,
     plain_password: Option<String>,
-    reservation: Option<quota::Reservation>,
+    claim: Claim,
 ) -> Result<String, AppError> {
-    if let Some(password) = plain_password.as_deref() {
+    let s3_key = uploaded.s3_key.clone();
+    let session_id = match &claim {
+        Claim::Session(id) => Some(id.clone()),
+        Claim::Reservation(_) => None,
+    };
+
+    let stored = store_row(
+        state,
+        user_id,
+        settings,
+        uploaded,
+        plain_password.as_deref(),
+        claim,
+    )
+    .await;
+    let (file, user_key) = match stored {
+        Ok(stored) => stored,
+        Err(e) => {
+            // NotFound means a concurrent request completed the session and owns the object
+            if let Some(id) = session_id.filter(|_| !matches!(e, AppError::NotFound)) {
+                discard_completed(state, &id, &s3_key).await;
+            }
+            return Err(e);
+        }
+    };
+
+    share_url(
+        state,
+        user_id,
+        settings,
+        &file,
+        plain_password.as_deref(),
+        user_key.as_deref(),
+    )
+    .await
+}
+
+/// writes the files row in one transaction with the claim it settles. returns
+/// the row and the encoded user key, if any
+async fn store_row(
+    state: &AppState,
+    user_id: &str,
+    settings: &UserSettings,
+    uploaded: Uploaded,
+    plain_password: Option<&str>,
+    claim: Claim,
+) -> Result<(File, Option<String>), AppError> {
+    if let Some(password) = plain_password {
         validators::password(password, 256)?;
     }
-    let password_hash = match plain_password.clone() {
-        Some(p) => Some(hash_password_async(p).await?),
+    let password_hash = match plain_password {
+        Some(p) => Some(hash_password_async(p.to_owned()).await?),
         None => None,
     };
 
@@ -206,8 +290,19 @@ pub(crate) async fn finalize(
 
     // detached so a client disconnect cannot orphan the stored object.
     // the quota claim becomes the row in one step
-    let finalize = tokio::spawn(async move {
+    let write = tokio::spawn(async move {
         let mut tx = db.begin().await?;
+        if let Claim::Session(session_id) = &claim {
+            let claimed = sqlx::query("DELETE FROM upload_sessions WHERE id = $1 AND user_id = $2")
+                .bind(session_id)
+                .bind(&owner_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            if claimed == 0 {
+                return Err(AppError::NotFound);
+            }
+        }
         let file = sqlx::query_as::<_, File>(
             r#"
             INSERT INTO files (id, user_id, display_name, original_name, content_type, size_bytes, password_hash, expires_at, encrypted, encryption_iv, user_key_hash, encryption_key_version, wrapped_dek, dek_iv, encryption_format)
@@ -232,17 +327,28 @@ pub(crate) async fn finalize(
         .bind(crypto::FORMAT_SEGMENTED_GCM)
         .fetch_one(&mut *tx)
         .await?;
-        if let Some(reservation) = reservation {
+        if let Claim::Reservation(reservation) = claim {
             reservation.settle(&mut *tx).await?;
         }
         tx.commit().await?;
         Ok::<_, AppError>(file)
     });
 
-    let file = finalize
+    let file = write
         .await
         .map_err(|e| AppError::internal_from("upload finalize panicked", e))??;
+    Ok((file, user_key))
+}
 
+/// the url a stored file is shared at
+async fn share_url(
+    state: &AppState,
+    user_id: &str,
+    settings: &UserSettings,
+    file: &File,
+    plain_password: Option<&str>,
+    user_key: Option<&str>,
+) -> Result<String, AppError> {
     let (files_domain, files_path_prefix) = sqlx::query_as::<_, (String, Option<String>)>(
         r#"
         SELECT d.name, ds.files_path_prefix
@@ -269,11 +375,31 @@ pub(crate) async fn finalize(
 
     Ok(append_query(
         &base_url,
-        &[
-            ("password", plain_password.as_deref()),
-            ("key", user_key.as_deref()),
-        ],
+        &[("password", plain_password), ("key", user_key)],
     ))
+}
+
+/// a completed multipart upload cannot be resumed, so a failure after it
+/// queues the assembled object for deletion and drops the session
+async fn discard_completed(state: &AppState, session_id: &str, s3_key: &str) {
+    let result = async {
+        let mut tx = state.db.begin().await?;
+        deletion::enqueue(&mut *tx, &[Pending::object(s3_key)]).await?;
+        sqlx::query("DELETE FROM upload_sessions WHERE id = $1")
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok::<_, AppError>(())
+    }
+    .await;
+    if let Err(e) = result {
+        tracing::warn!(
+            s3_key = %s3_key,
+            error = %e,
+            "could not discard a completed upload that failed to finalize"
+        );
+    }
 }
 
 pub(crate) struct Budget {
@@ -489,8 +615,17 @@ async fn read_text_field(mut field: Field) -> Result<String, AppError> {
     String::from_utf8(buf).map_err(|_| AppError::BadRequest("form field is not valid utf-8".into()))
 }
 
-async fn drain_field(mut field: Field) -> Result<(), AppError> {
-    while within_idle_timeout(field.try_next()).await?.is_some() {}
+/// reads and discards a field the form does not use. `ignored` counts every
+/// discarded byte in the request
+async fn drain_field(mut field: Field, ignored: &mut usize) -> Result<(), AppError> {
+    while let Some(chunk) = within_idle_timeout(field.try_next()).await? {
+        *ignored += chunk.len();
+        if *ignored > MAX_IGNORED_BYTES {
+            return Err(AppError::BadRequest(
+                "unexpected form field is too large".into(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -527,6 +662,45 @@ mod tests {
 
     const BODY: usize = 20 * 1024 * 1024;
     const BOUNDARY: &str = "----ionotestboundary";
+
+    /// the field borrows the multipart stream, so both must stay alive
+    async fn first_field(body: Vec<u8>) -> (Multipart, Field) {
+        let mut headers = actix_web::http::header::HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            "multipart/form-data; boundary=B".parse().unwrap(),
+        );
+        let stream = stream::iter([Ok::<_, actix_web::error::PayloadError>(Bytes::from(body))]);
+        let mut multipart = Multipart::new(&headers, stream);
+        let field = multipart.try_next().await.unwrap().unwrap();
+        (multipart, field)
+    }
+
+    fn unknown_field(len: usize) -> Vec<u8> {
+        let mut body = b"--B\r\nContent-Disposition: form-data; name=\"junk\"\r\n\r\n".to_vec();
+        body.extend(std::iter::repeat_n(b'a', len));
+        body.extend_from_slice(b"\r\n--B--\r\n");
+        body
+    }
+
+    #[actix_web::test]
+    async fn an_unexpected_field_within_the_cap_is_ignored() {
+        let (_multipart, field) = first_field(unknown_field(MAX_IGNORED_BYTES)).await;
+        let mut ignored = 0;
+        let result = drain_field(field, &mut ignored).await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(ignored, MAX_IGNORED_BYTES);
+    }
+
+    #[actix_web::test]
+    async fn an_oversized_unexpected_field_is_rejected() {
+        let (_multipart, field) = first_field(unknown_field(MAX_IGNORED_BYTES + 1)).await;
+        let result = drain_field(field, &mut 0).await;
+        assert!(
+            matches!(&result, Err(AppError::BadRequest(m)) if m.contains("too large")),
+            "{result:?}"
+        );
+    }
 
     struct Fixture {
         state: web::Data<CoreState>,
