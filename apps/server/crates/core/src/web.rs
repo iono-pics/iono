@@ -100,7 +100,7 @@ impl ResponseError for ApiError {
             AppError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             AppError::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
             AppError::Gone(_) => StatusCode::GONE,
-            AppError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            AppError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             AppError::Database(_) | AppError::Io(_) | AppError::Internal { .. } => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -113,8 +113,17 @@ impl ResponseError for ApiError {
             tracing::error!(error = %error_chain(&self.0), "internal error");
             return HttpResponse::build(status).json(json!({ "error": "internal server error" }));
         }
-        HttpResponse::build(status).json(json!({ "error": self.0.to_string() }))
+        let mut response = HttpResponse::build(status);
+        if let AppError::RateLimited { retry_after } = &self.0 {
+            response.insert_header((header::RETRY_AFTER, retry_after_seconds(*retry_after)));
+        }
+        response.json(json!({ "error": self.0.to_string() }))
     }
+}
+
+/// whole seconds for a `Retry-After` header, rounded up and never zero
+fn retry_after_seconds(wait: std::time::Duration) -> u64 {
+    (wait.as_secs() + u64::from(wait.subsec_nanos() > 0)).max(1)
 }
 
 /// the error and each of its sources, outermost first, so a log line shows
@@ -322,5 +331,45 @@ impl Page {
         let limit = self.limit.unwrap_or(default).clamp(1, max);
         let offset = self.offset.unwrap_or(0).max(0);
         (limit, offset)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn retry_after(error: AppError) -> Option<String> {
+        ApiError(error)
+            .error_response()
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    }
+
+    #[test]
+    fn a_rate_limited_response_says_when_to_retry() {
+        let error = AppError::rate_limited(Duration::from_secs(30));
+        assert_eq!(
+            ApiError(AppError::rate_limited(Duration::from_secs(30)))
+                .error_response()
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(retry_after(error).as_deref(), Some("30"));
+    }
+
+    #[test]
+    fn the_wait_is_rounded_up_and_never_zero() {
+        assert_eq!(retry_after_seconds(Duration::from_millis(1500)), 2);
+        assert_eq!(retry_after_seconds(Duration::from_millis(1)), 1);
+        assert_eq!(retry_after_seconds(Duration::ZERO), 1);
+    }
+
+    #[test]
+    fn other_errors_carry_no_retry_after() {
+        assert_eq!(retry_after(AppError::Unauthorized), None);
+        assert_eq!(retry_after(AppError::internal("failed")), None);
     }
 }

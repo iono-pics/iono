@@ -3,6 +3,7 @@
 //! both slow and an easy way to exhaust memory. a credential that verified
 //! once is trusted for a while, and the slow path is rate limited per client
 
+use actix_governor::governor::clock::Clock;
 use actix_governor::governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use iono_core::AppError;
 use sha2::{Digest, Sha256};
@@ -56,8 +57,10 @@ impl Unlocker {
         }
 
         if let Some(ip) = client {
-            if self.limiter.check_key(&ip).is_err() {
-                return Err(AppError::RateLimited);
+            if let Err(refused) = self.limiter.check_key(&ip) {
+                return Err(AppError::rate_limited(
+                    refused.wait_time_from(self.limiter.clock().now()),
+                ));
             }
         }
 
@@ -173,7 +176,7 @@ mod tests {
                     Ok(false)
                 })
                 .await;
-            if matches!(result, Err(AppError::RateLimited)) {
+            if matches!(result, Err(AppError::RateLimited { .. })) {
                 limited = true;
                 break;
             }

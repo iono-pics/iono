@@ -1,3 +1,4 @@
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -27,7 +28,7 @@ pub enum AppError {
     Gone(String),
 
     #[error("too many attempts, try again later")]
-    RateLimited,
+    RateLimited { retry_after: Duration },
 
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
@@ -44,6 +45,11 @@ pub enum AppError {
 }
 
 impl AppError {
+    /// a rate limit refusal that clears after `retry_after`
+    pub fn rate_limited(retry_after: Duration) -> Self {
+        AppError::RateLimited { retry_after }
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         AppError::Internal {
             message: message.into(),

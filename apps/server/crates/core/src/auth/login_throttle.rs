@@ -1,3 +1,4 @@
+use actix_governor::governor::clock::Clock;
 use actix_governor::governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use sha2::{Digest, Sha256};
 use std::net::{IpAddr, Ipv6Addr};
@@ -41,7 +42,9 @@ impl LoginThrottle {
         }
         self.limiter
             .check_key(&key(identifier, client))
-            .map_err(|_| AppError::RateLimited)
+            .map_err(|refused| {
+                AppError::rate_limited(refused.wait_time_from(self.limiter.clock().now()))
+            })
     }
 }
 
@@ -83,8 +86,21 @@ mod tests {
         }
         assert!(matches!(
             throttle.check("evie", ip("1.1.1.1")),
-            Err(AppError::RateLimited)
+            Err(AppError::RateLimited { .. })
         ));
+    }
+
+    #[test]
+    fn a_refused_attempt_says_how_long_to_wait() {
+        let throttle = LoginThrottle::default();
+        for _ in 0..BURST {
+            let _ = throttle.check("evie", ip("1.1.1.1"));
+        }
+        let Err(AppError::RateLimited { retry_after }) = throttle.check("evie", ip("1.1.1.1"))
+        else {
+            panic!("the attempt was not refused");
+        };
+        assert!(!retry_after.is_zero() && retry_after <= REPLENISH_EVERY);
     }
 
     #[test]

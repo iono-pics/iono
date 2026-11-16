@@ -1,6 +1,6 @@
 use rand::Rng;
 use sqlx::PgPool;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
 use totp_rs::{Algorithm, Secret, TOTP};
 
@@ -120,16 +120,20 @@ pub fn reveal_secret(keyring: &Keyring, user_id: &str, stored: &str) -> AppResul
 
 /// refuses while the account is locked out from too many wrong codes
 pub async fn ensure_not_locked(db: &PgPool, user_id: &str) -> AppResult<()> {
-    let locked: Option<bool> =
-        sqlx::query_scalar("SELECT totp_locked_until > now() FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(db)
-            .await?
-            .flatten();
-    if locked == Some(true) {
-        return Err(AppError::RateLimited);
+    let remaining: Option<f64> = sqlx::query_scalar(
+        "SELECT EXTRACT(EPOCH FROM (totp_locked_until - now()))::float8 FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(db)
+    .await?
+    .flatten();
+    let wait = remaining
+        .and_then(|secs| Duration::try_from_secs_f64(secs).ok())
+        .filter(|wait| !wait.is_zero());
+    match wait {
+        Some(retry_after) => Err(AppError::rate_limited(retry_after)),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// counts a wrong code or recovery code, locking the account at the limit
@@ -215,7 +219,6 @@ pub async fn accept_code(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     fn keyring() -> Keyring {
         Keyring::new(1, &crypto::encode_key(&crypto::random_key()), "").unwrap()
