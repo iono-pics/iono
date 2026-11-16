@@ -11,8 +11,8 @@ use crate::state::HasDb;
 use crate::web::{state_and_bearer, ApiError};
 
 pub async fn authenticate(db: &PgPool, api_token: &str) -> Result<User, AppError> {
-    let hash = token::hash_api_token(api_token); // SHA256 since its fast, argon is probably better but slower
-                                                 // + theres no dict to bruteforce randomly generated tokens
+    // sha256 is sufficient for random 256 bit tokens, which have no dictionary to guess from
+    let hash = token::hash_api_token(api_token);
 
     let user = sqlx::query_as::<_, User>(
         r#"

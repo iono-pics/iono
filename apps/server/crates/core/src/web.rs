@@ -191,7 +191,6 @@ pub const CLIENT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::fro
 /// how long a disconnecting client may keep a connection open
 pub const CLIENT_DISCONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// open connections per worker
 pub const MAX_CONNECTIONS_PER_WORKER: usize = 2048;
 
 /// records the request path only, since query strings can carry passwords and

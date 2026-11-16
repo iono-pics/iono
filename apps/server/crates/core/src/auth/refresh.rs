@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::auth::token::hash_api_token;
 use crate::entities::User;
 use crate::error::AppError;
+use crate::rate_limit::request_ip;
 
 pub const REFRESH_TOKEN_PREFIX: &str = "ionor_";
 
@@ -32,12 +33,8 @@ impl SessionContext {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.chars().take(MAX_USER_AGENT_LEN).collect());
 
-        let ip = req
-            .headers()
-            .get("cf-connecting-ip")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.trim().to_string())
-            .or_else(|| req.peer_addr().map(|addr| addr.ip().to_string()));
+        // request_ip trusts cf-connecting-ip only from configured proxies
+        let ip = request_ip(req).map(|ip| ip.to_string());
 
         Self { user_agent, ip }
     }
@@ -79,6 +76,9 @@ async fn issue_in_family<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
+    let expires_at = Duration::try_days(ttl_days)
+        .and_then(|ttl| Utc::now().checked_add_signed(ttl))
+        .ok_or_else(|| AppError::internal("refresh token ttl is out of range"))?;
     let plaintext = generate();
 
     sqlx::query(
@@ -93,10 +93,9 @@ where
     .bind(hash_api_token(&plaintext))
     .bind(ctx.user_agent.as_deref())
     .bind(ctx.ip.as_deref())
-    .bind(Utc::now() + Duration::days(ttl_days))
+    .bind(expires_at)
     .execute(db)
-    .await
-    .map_err(AppError::from)?;
+    .await?;
 
     Ok(plaintext)
 }
@@ -109,15 +108,14 @@ pub async fn rotate(
 ) -> Result<(User, String), AppError> {
     let hash = hash_api_token(presented);
 
-    let mut tx = db.begin().await.map_err(AppError::from)?;
+    let mut tx = db.begin().await?;
 
     let row = sqlx::query_as::<_, RefreshRow>(
         "SELECT * FROM refresh_tokens WHERE token_hash = $1 FOR UPDATE",
     )
     .bind(&hash)
     .fetch_optional(&mut *tx)
-    .await
-    .map_err(AppError::from)?
+    .await?
     .ok_or(AppError::Unauthorized)?;
 
     let within_grace = row
@@ -130,9 +128,8 @@ pub async fn rotate(
         )
         .bind(&row.family_id)
         .execute(&mut *tx)
-        .await
-        .map_err(AppError::from)?;
-        tx.commit().await.map_err(AppError::from)?;
+        .await?;
+        tx.commit().await?;
 
         tracing::warn!(
             user_id = %row.user_id,
@@ -149,8 +146,7 @@ pub async fn rotate(
     let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
         .bind(&row.user_id)
         .fetch_optional(&mut *tx)
-        .await
-        .map_err(AppError::from)?
+        .await?
         .ok_or(AppError::Unauthorized)?;
 
     if user.deleted_at.is_some() {
@@ -162,12 +158,11 @@ pub async fn rotate(
     sqlx::query("UPDATE refresh_tokens SET rotated_at = COALESCE(rotated_at, now()) WHERE id = $1")
         .bind(&row.id)
         .execute(&mut *tx)
-        .await
-        .map_err(AppError::from)?;
+        .await?;
 
     let next = issue_in_family(&mut *tx, &row.user_id, &row.family_id, ttl_days, ctx).await?;
 
-    tx.commit().await.map_err(AppError::from)?;
+    tx.commit().await?;
 
     Ok((user, next))
 }
@@ -182,8 +177,7 @@ pub async fn revoke(db: &PgPool, presented: &str) -> Result<(), AppError> {
     )
     .bind(hash_api_token(presented))
     .execute(db)
-    .await
-    .map_err(AppError::from)?;
+    .await?;
 
     Ok(())
 }
@@ -197,8 +191,7 @@ where
     )
     .bind(user_id)
     .execute(db)
-    .await
-    .map_err(AppError::from)?
+    .await?
     .rows_affected();
 
     Ok(revoked)

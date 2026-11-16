@@ -204,8 +204,8 @@ pub(crate) async fn finalize(
         ..
     } = uploaded;
 
-    // detached so a client disconnecting cant orphan the object we just wrote.
-    // the claim on quota becomes the row in one step
+    // detached so a client disconnect cannot orphan the stored object.
+    // the quota claim becomes the row in one step
     let finalize = tokio::spawn(async move {
         let mut tx = db.begin().await?;
         let file = sqlx::query_as::<_, File>(
@@ -431,7 +431,7 @@ async fn store_field(
         }
     };
 
-    // the final segment is only sealed once we know it is the final one
+    // the final segment is sealed only once it is known to be final
     if whole_body {
         sent_whole_body.store(true, Ordering::SeqCst);
         let last = sealer.finish().map(Bytes::from);
@@ -656,7 +656,7 @@ mod tests {
             );
 
             let size = row.size_bytes as u64;
-            let range = crypto::sealed_range(size, 0, size - 1);
+            let range = crypto::sealed_range(size, 0, size - 1).unwrap();
             let mut opener = crypto::Opener::new(&key, size, &range);
             let plain = opener.push(&cipher).unwrap();
             opener.finish().unwrap();

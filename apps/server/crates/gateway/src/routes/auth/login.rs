@@ -54,7 +54,7 @@ pub async fn login(
 
     let password_hash = user.as_ref().and_then(|u| u.password_hash.clone());
     let (Some(user), Some(password_hash)) = (user, password_hash) else {
-        verify_against_dummy(body.password.clone()).await;
+        verify_against_dummy(body.password.clone()).await?;
         return Err(AppError::Unauthorized.into());
     };
 

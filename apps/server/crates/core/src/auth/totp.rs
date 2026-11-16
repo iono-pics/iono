@@ -93,8 +93,7 @@ pub fn seal_secret(keyring: &Keyring, user_id: &str, secret_base32: &str) -> App
     ))
 }
 
-/// the base32 secret, and whether it was stored in the clear from before
-/// secrets were sealed
+/// the base32 secret, and whether it was stored unsealed
 pub fn reveal_secret(keyring: &Keyring, user_id: &str, stored: &str) -> AppResult<(String, bool)> {
     let Some(rest) = stored
         .strip_prefix(SEALED_PREFIX)

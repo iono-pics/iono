@@ -113,8 +113,7 @@ async fn consume_recovery_code(state: &AppState, user_id: &str, code: &str) -> A
         return Ok(true);
     }
 
-    // codes issued before the fast hash are argon2, so they can only be found
-    // by trying each one
+    // argon2 hashes are salted, so they can only be found by trying each one
     let legacy = sqlx::query_as::<_, TotpRecoveryCode>(
         "SELECT * FROM totp_recovery_codes WHERE user_id = $1 AND used_at IS NULL AND code_hash LIKE '$argon2%'",
     )

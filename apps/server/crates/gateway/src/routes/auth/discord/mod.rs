@@ -78,7 +78,6 @@ pub(crate) async fn consume_flow_and_fetch(
         .await
         .map_err(map_oauth_error)?;
 
-    // the tokens are dropped here, the discord user is all we wanted
     Ok((discord_user, link_user_id))
 }
 

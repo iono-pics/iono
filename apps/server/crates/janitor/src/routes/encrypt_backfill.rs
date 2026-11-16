@@ -203,7 +203,7 @@ enum Outcome {
 enum Applied {
     Converted,
     Rewrapped,
-    /// the file was deleted or changed while we worked, nothing to record
+    /// the file was deleted or changed during conversion, nothing to record
     Gone,
 }
 
@@ -483,7 +483,7 @@ mod tests {
             return Vec::new();
         }
         let size = row.size_bytes as u64;
-        let range = crypto::sealed_range(size, 0, size - 1);
+        let range = crypto::sealed_range(size, 0, size - 1).unwrap();
         let mut opener = crypto::Opener::new(&key, size, &range);
         let plain = opener.push(&sealed).unwrap();
         opener.finish().unwrap();

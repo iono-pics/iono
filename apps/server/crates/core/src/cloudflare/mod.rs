@@ -1,6 +1,4 @@
-//! Typed client for CFV4 API, code inspired by cloudflare-rs crate.
-//! I might turn this into its own seperate crate and publish it if
-//! i feel motivated to flesh it out.
+//! Typed client for the Cloudflare v4 API, adapted from the cloudflare-rs crate.
 
 mod client;
 pub mod endpoints;

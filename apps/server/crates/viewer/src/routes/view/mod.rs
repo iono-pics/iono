@@ -125,8 +125,8 @@ struct Body {
     content_length: Option<u64>,
 }
 
-/// format 2. the client's range is in plaintext bytes, which we widen to whole
-/// segments for storage, then open and trim back down
+/// format 2. the client's plaintext range is widened to whole segments for
+/// storage, then opened and trimmed back down
 async fn sealed_body(
     state: &AppState,
     file: &File,
@@ -149,7 +149,7 @@ async fn sealed_body(
 
     let key = sealed_content_key(state, file, user_key)?;
     let (start, end) = wanted.unwrap_or((0, size - 1));
-    let sealed = crypto::sealed_range(size, start, end);
+    let sealed = crypto::sealed_range(size, start, end)?;
     let object = state
         .storage
         .get(
@@ -191,8 +191,8 @@ fn sealed_content_key(
     Ok(crypto::content_key(&dek, salt, user_key.as_ref()))
 }
 
-// a segment that fails authentication ends the response with an error, the
-// client never receives bytes we could not verify
+// a segment that fails authentication ends the response with an error, so
+// unverified bytes are never sent
 fn opening_stream(
     inner: BoxStream<'static, std::io::Result<Bytes>>,
     opener: crypto::Opener,
@@ -228,8 +228,8 @@ enum RangeRequest {
     Unsatisfiable,
 }
 
-/// one byte range, as media players send. anything we do not handle, like
-/// several ranges at once, is answered with the whole file as rfc 9110 allows
+/// one byte range, as media players send. anything else, like several ranges
+/// at once, is answered with the whole file as rfc 9110 allows
 fn parse_range(header: &str, size: u64) -> RangeRequest {
     let Some(spec) = header.trim().strip_prefix("bytes=") else {
         return RangeRequest::Whole;
@@ -313,7 +313,7 @@ async fn verify_user_key(
         return Err(AppError::NotFound);
     };
 
-    // only files from before keys got a fast hash still need argon2
+    // only argon2 hashes need the slow check
     let matched = if is_legacy_secret_hash(stored) {
         let matched = state
             .unlocker

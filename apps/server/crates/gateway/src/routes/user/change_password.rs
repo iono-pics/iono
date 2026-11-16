@@ -23,10 +23,8 @@ pub struct ChangePasswordRequest {
     new_password: String,
 }
 
-/// incrementing token_version invalidates every pre-exising token
-///
-/// a new token is generated after the password is changed and should
-/// be swapped in the calling users session so they're not logged out
+/// incrementing token_version invalidates every existing access token. the
+/// response carries a fresh pair for the calling session
 #[utoipa::path(
     post,
     path = "/user/change-password",
@@ -50,7 +48,6 @@ pub async fn change_password(
 
     let Some(current_hash) = user.0.password_hash.clone() else {
         return Err(AppError::BadRequest("account has no password set".into()).into());
-        // TODO: handle OAuth2 accounts
     };
 
     let verified = verify_password_async(body.current_password.clone(), current_hash).await?;

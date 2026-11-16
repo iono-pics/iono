@@ -35,12 +35,24 @@ pub fn random_nonce() -> String {
     hex::encode(bytes)
 }
 
-/// the key files are encrypted under now, plus the older keys still needed to
-/// read files written before a rotation
-#[derive(Debug, Clone)]
+/// the key new files are encrypted under, plus the previous keys needed to
+/// read older files
+#[derive(Clone)]
 pub struct Keyring {
     current_version: i16,
     keys: HashMap<i16, [u8; KEY_LEN]>,
+}
+
+// written by hand so a stray `{:?}` can never print key material
+impl std::fmt::Debug for Keyring {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut versions: Vec<_> = self.keys.keys().copied().collect();
+        versions.sort_unstable();
+        f.debug_struct("Keyring")
+            .field("current_version", &self.current_version)
+            .field("versions", &versions)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Keyring {
@@ -113,8 +125,8 @@ pub enum KeyError {
     WrongLength,
 }
 
-/// a key a client sent is a bad request. a key from our own config is not, so
-/// startup code maps this itself instead of using the conversion
+/// a key sent by a client is a bad request. startup code maps keys from config
+/// itself instead of using this conversion
 impl From<KeyError> for AppError {
     fn from(error: KeyError) -> Self {
         AppError::BadRequest(error.to_string())
@@ -174,8 +186,8 @@ pub fn encrypt_buffer(key: &[u8; KEY_LEN], iv: &[u8; IV_LEN], buf: &mut [u8]) ->
     Ok(())
 }
 
-/// wraps a data key under a key encrypting key with unauthenticated ctr. only
-/// kept to read keys wrapped before [`seal_key`]
+/// wraps a data key under a kek with unauthenticated ctr. [`seal_key`] is the
+/// authenticated form used for new keys
 ///
 /// # Errors
 ///
@@ -206,8 +218,8 @@ pub fn unwrap_key(
     wrap_key(kek, iv, &wrapped)
 }
 
-/// format 1 is aes-ctr: no integrity, a flipped ciphertext bit flips the same
-/// plaintext bit. it is only read now, for files written before format 2
+/// format 1 is aes-ctr with no integrity: a flipped ciphertext bit flips the
+/// same plaintext bit. it is read only
 pub const FORMAT_CTR: i16 = 1;
 /// aes-256-gcm over fixed size segments, see Sealer
 pub const FORMAT_SEGMENTED_GCM: i16 = 2;
@@ -220,7 +232,7 @@ pub const SEALED_SEGMENT_LEN: usize = SEGMENT_LEN + TAG_LEN;
 pub const WRAP_NONCE_LEN: usize = 12;
 
 /// the key a format 2 object is sealed under. a file with a user key needs
-/// both secrets, so one aead pass covers what used to be two ctr layers
+/// both secrets
 ///
 /// this derivation is frozen: every stored format 2 object was sealed under
 /// its output, so changing it (to hkdf, say) makes them unreadable. a better
@@ -359,20 +371,22 @@ pub struct SealedRange {
 
 /// `start..=end` is a plaintext range inside a file of `plain_len` bytes
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics in debug builds, and computes a wrong range in release builds,
-/// unless `start <= end < plain_len`. callers must validate the range first,
-/// as the viewer's range parser does.
-pub fn sealed_range(plain_len: u64, start: u64, end: u64) -> SealedRange {
-    debug_assert!(start <= end && end < plain_len, "range is outside the file");
+/// Returns an internal error unless `start <= end < plain_len`. callers
+/// validate the range against the file first, as the viewer's range parser
+/// does, so this only fires on a bug.
+pub fn sealed_range(plain_len: u64, start: u64, end: u64) -> AppResult<SealedRange> {
+    if start > end || end >= plain_len {
+        return Err(AppError::internal("range is outside the file"));
+    }
     let seg = SEGMENT_LEN as u64;
     let first_segment = start / seg;
     let last_segment = end / seg;
     // the remainder is below SEGMENT_LEN, so it always fits a usize
     #[allow(clippy::cast_possible_truncation)]
     let skip = (start % seg) as usize;
-    SealedRange {
+    Ok(SealedRange {
         first_segment,
         skip,
         len: end - start + 1,
@@ -380,7 +394,7 @@ pub fn sealed_range(plain_len: u64, start: u64, end: u64) -> SealedRange {
         sealed_end_inclusive: ((last_segment + 1) * SEALED_SEGMENT_LEN as u64)
             .min(sealed_len(plain_len))
             - 1,
-    }
+    })
 }
 
 /// opens sealed segments as they arrive. any tampered, reordered or missing
@@ -504,7 +518,7 @@ pub fn open_bytes(
     Ok(plain)
 }
 
-/// opens a key from seal_key, or one from the older unauthenticated ctr wrap
+/// opens a key from seal_key or from the unauthenticated ctr wrap
 pub fn open_key(
     kek: &[u8; KEY_LEN],
     nonce: &[u8],
@@ -550,7 +564,7 @@ mod tests {
         start: u64,
         end: u64,
     ) -> AppResult<Vec<u8>> {
-        let range = sealed_range(plain_len, start, end);
+        let range = sealed_range(plain_len, start, end)?;
         let slice = &sealed[range.sealed_start as usize..=range.sealed_end_inclusive as usize];
         let mut opener = Opener::new(key, plain_len, &range);
         let mut out = Vec::new();
@@ -731,7 +745,7 @@ mod tests {
     fn range_math_points_at_whole_segments() {
         let seg = SEGMENT_LEN as u64;
         let plain_len = 3 * seg + 10;
-        let range = sealed_range(plain_len, seg + 3, seg + 7);
+        let range = sealed_range(plain_len, seg + 3, seg + 7).unwrap();
         assert_eq!(range.first_segment, 1);
         assert_eq!(range.skip, 3);
         assert_eq!(range.len, 5);
@@ -741,8 +755,16 @@ mod tests {
             2 * SEALED_SEGMENT_LEN as u64 - 1
         );
 
-        let tail = sealed_range(plain_len, plain_len - 1, plain_len - 1);
+        let tail = sealed_range(plain_len, plain_len - 1, plain_len - 1).unwrap();
         assert_eq!(tail.sealed_end_inclusive, sealed_len(plain_len) - 1);
+    }
+
+    #[test]
+    fn a_range_outside_the_file_is_an_error() {
+        assert!(sealed_range(10, 5, 4).is_err());
+        assert!(sealed_range(10, 0, 10).is_err());
+        assert!(sealed_range(0, 0, 0).is_err());
+        assert!(sealed_range(10, 0, 9).is_ok());
     }
 
     #[test]

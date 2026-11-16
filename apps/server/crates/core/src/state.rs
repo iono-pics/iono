@@ -25,6 +25,8 @@ impl CoreState {
         let keyring = config
             .keyring()
             .unwrap_or_else(|e| fatal("build the encryption keyring", &e));
+        crate::auth::password::init_dummy_hash()
+            .unwrap_or_else(|e| fatal("build the dummy password hash", &e));
         Self {
             keyring,
             storage,

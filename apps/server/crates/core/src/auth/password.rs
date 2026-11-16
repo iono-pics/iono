@@ -1,7 +1,7 @@
 use argon2::password_hash::{rand_core::OsRng, SaltString};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 use subtle::ConstantTimeEq;
 use tokio::sync::Semaphore;
 
@@ -42,18 +42,35 @@ pub fn verify_password(plain: &str, hash: &str) -> Result<bool, AppError> {
         .is_ok())
 }
 
-static DUMMY_HASH: LazyLock<String> = LazyLock::new(|| {
-    hash_password("iono-dummy-password").unwrap_or_else(|e| {
-        tracing::error!(error = %e, "dummy password hash could not be built");
-        String::new()
-    })
-});
+static DUMMY_HASH: OnceLock<String> = OnceLock::new();
+
+/// builds the hash used by [`verify_against_dummy`]. call it once at startup
+///
+/// # Errors
+///
+/// Returns an internal error when hashing fails.
+pub fn init_dummy_hash() -> AppResult<()> {
+    if DUMMY_HASH.get().is_none() {
+        // losing a race to another caller is fine, both hashes are equivalent
+        let _ = DUMMY_HASH.set(hash_password("iono-dummy-password")?);
+    }
+    Ok(())
+}
 
 /// spends the cost of a password check when there is no stored hash to check
 /// against, so a missing account takes as long as a wrong password
-pub async fn verify_against_dummy(plain: String) {
-    // the result is irrelevant, only the time spent matters
-    let _ = verify_password_async(plain, DUMMY_HASH.clone()).await;
+///
+/// # Errors
+///
+/// Returns an internal error when [`init_dummy_hash`] has not run or the check
+/// task fails.
+pub async fn verify_against_dummy(plain: String) -> AppResult<()> {
+    let hash = DUMMY_HASH
+        .get()
+        .cloned()
+        .ok_or_else(|| AppError::internal("dummy password hash was not initialised"))?;
+    // whether it matches is irrelevant, only the time spent matters
+    verify_password_async(plain, hash).await.map(|_| ())
 }
 
 pub async fn hash_password_async(plain: String) -> AppResult<String> {
@@ -72,8 +89,8 @@ pub async fn verify_password_async(plain: String, hash: String) -> AppResult<boo
     .await
 }
 
-/// for secrets we generated (file keys, recovery codes). they have no
-/// dictionary to guess from, so a slow hash only costs us time
+/// for generated secrets such as file keys and recovery codes. they have no
+/// dictionary to guess from, so a slow hash adds no protection
 pub fn hash_secret(plain: &str) -> String {
     hash_api_token(plain)
 }
@@ -82,7 +99,7 @@ pub fn hash_secret(plain: &str) -> String {
 pub enum SecretMatch {
     No,
     Yes,
-    /// matched an argon2 hash from before hash_secret, worth rewriting
+    /// matched a legacy argon2 hash, which should be rewritten
     YesLegacy,
 }
 
@@ -158,6 +175,12 @@ mod tests {
             verify_secret("nope", &stored).await.unwrap(),
             SecretMatch::No
         );
+    }
+
+    #[tokio::test]
+    async fn the_dummy_check_runs_once_initialised() {
+        init_dummy_hash().unwrap();
+        verify_against_dummy("anything".into()).await.unwrap();
     }
 
     #[test]

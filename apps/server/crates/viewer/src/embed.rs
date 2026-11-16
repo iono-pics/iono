@@ -211,8 +211,8 @@ mod tests {
         assert!(!html.contains("theme-color"), "{html}");
     }
 
-    /// without a preset the page carries no branding of ours at all, so the
-    /// consumer falls back to the user's own domain
+    /// without a preset the page carries no iono branding, so the consumer
+    /// falls back to the user's own domain
     #[test]
     fn no_preset_means_no_site_name_or_theme_colour() {
         let html = render_embed_html(

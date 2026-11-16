@@ -1,6 +1,6 @@
 use actix_governor::governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use sha2::{Digest, Sha256};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::num::NonZeroU32;
 use std::time::Duration;
 
@@ -50,9 +50,21 @@ fn key(identifier: &str, client: Option<IpAddr>) -> [u8; 32] {
     hasher.update(identifier.trim().to_lowercase().as_bytes());
     hasher.update([0]);
     if let Some(ip) = client {
-        hasher.update(ip.to_string().as_bytes());
+        hasher.update(bucket(ip).to_string().as_bytes());
     }
     hasher.finalize().into()
+}
+
+/// one client usually controls a whole /64, so keying on the exact ipv6
+/// address would let it rotate addresses for a fresh budget every attempt
+fn bucket(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) => {
+            let masked = u128::from(v6) & (u128::MAX << 64);
+            IpAddr::V6(Ipv6Addr::from(masked))
+        }
+        v4 => v4,
+    }
 }
 
 #[cfg(test)]
@@ -82,6 +94,16 @@ mod tests {
             let _ = throttle.check("evie", ip("1.1.1.1"));
         }
         assert!(throttle.check("evie", ip("2.2.2.2")).is_ok());
+    }
+
+    #[test]
+    fn rotating_within_an_ipv6_64_does_not_reset_the_budget() {
+        let throttle = LoginThrottle::default();
+        for i in 0..BURST {
+            let _ = throttle.check("evie", ip(&format!("2001:db8:1:2::{i:x}")));
+        }
+        assert!(throttle.check("evie", ip("2001:db8:1:2:ffff::1")).is_err());
+        assert!(throttle.check("evie", ip("2001:db8:1:3::1")).is_ok());
     }
 
     #[test]

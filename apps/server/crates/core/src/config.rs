@@ -11,7 +11,6 @@ pub struct Config {
     pub host: String,
     /// proxies whose `cf-connecting-ip` header is believed
     pub trusted_proxies: TrustedProxies,
-    /// origins browsers may call the api from
     pub cors_allowed_origins: Vec<String>,
     pub gateway_port: u16,
     pub ingest_port: u16,
@@ -89,6 +88,9 @@ pub enum ConfigError {
 
     #[error("{0} must be at least {1} characters")]
     TooShort(&'static str, usize),
+
+    #[error("{0} must be between {1} and {2}")]
+    OutOfRange(&'static str, i64, i64),
 
     #[error("FILE_ENCRYPTION_KEY malformed")]
     EncryptionKey(#[source] crate::crypto::KeyError),
@@ -206,9 +208,106 @@ impl Config {
             discord_success_redirect_url: env_optional("DISCORD_SUCCESS_REDIRECT_URL"),
         };
 
+        config.validate_ranges()?;
         // fail at startup on a bad previous key too, not on the first request
         config.keyring().map_err(ConfigError::Keyring)?;
         Ok(config)
+    }
+
+    /// refuses numbers that would panic or misbehave later, such as a zero
+    /// rate limit burst or a token lifetime too large for a date
+    fn validate_ranges(&self) -> Result<(), ConfigError> {
+        const MINUTES_PER_WEEK: i64 = 7 * 24 * 60;
+        const DAYS_PER_DECADE: i64 = 3650;
+
+        in_range(
+            "DATABASE_MAX_CONNECTIONS",
+            self.database_max_connections,
+            1,
+            1000,
+        )?;
+        in_range(
+            "JWT_ACCESS_TTL_MINUTES",
+            self.jwt_access_ttl_minutes,
+            1,
+            MINUTES_PER_WEEK,
+        )?;
+        in_range(
+            "REFRESH_TOKEN_TTL_DAYS",
+            self.refresh_token_ttl_days,
+            1,
+            DAYS_PER_DECADE,
+        )?;
+        in_range(
+            "RECOVERY_WINDOW_DAYS",
+            self.recovery_window_days,
+            0,
+            DAYS_PER_DECADE,
+        )?;
+        in_range(
+            "OAUTH_FLOW_STATE_TTL_MINUTES",
+            self.oauth_flow_state_ttl_minutes,
+            1,
+            MINUTES_PER_WEEK,
+        )?;
+        in_range(
+            "WEBAUTHN_CEREMONY_TTL_MINUTES",
+            self.webauthn_ceremony_ttl_minutes,
+            1,
+            MINUTES_PER_WEEK,
+        )?;
+        in_range(
+            "TOTP_RECOVERY_CODE_COUNT",
+            self.totp_recovery_code_count,
+            1,
+            100,
+        )?;
+        in_range("SWEEP_BATCH_SIZE", self.sweep_batch_size, 1, 100_000)?;
+        in_range(
+            "ENCRYPT_BACKFILL_BATCH_SIZE",
+            self.encrypt_backfill_batch_size,
+            1,
+            100_000,
+        )?;
+        // governor refuses a zero period or burst
+        in_range(
+            "AUTH_RATE_LIMIT_SECONDS_PER_REQUEST",
+            self.auth_rate_limit_seconds_per_request,
+            1,
+            86_400,
+        )?;
+        in_range(
+            "AUTH_RATE_LIMIT_BURST",
+            self.auth_rate_limit_burst,
+            1,
+            100_000,
+        )?;
+        in_range(
+            "INGEST_RATE_LIMIT_SECONDS_PER_REQUEST",
+            self.ingest_rate_limit_seconds_per_request,
+            1,
+            86_400,
+        )?;
+        in_range(
+            "INGEST_RATE_LIMIT_BURST",
+            self.ingest_rate_limit_burst,
+            1,
+            100_000,
+        )?;
+        Ok(())
+    }
+}
+
+fn in_range<T: Copy>(key: &'static str, value: T, min: i64, max: i64) -> Result<(), ConfigError>
+where
+    i64: TryFrom<T>,
+{
+    // a value too big for an i64 is certainly above max
+    let value = i64::try_from(value).unwrap_or(i64::MAX);
+    if (min..=max).contains(&value) {
+        Ok(())
+    } else {
+        Err(ConfigError::OutOfRange(key, min, max))
     }
 }
 
@@ -300,6 +399,15 @@ mod tests {
         ] {
             assert!(parse_origins(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn numbers_outside_their_range_are_refused() {
+        assert!(in_range("X", 5u32, 1, 10).is_ok());
+        assert!(in_range("X", 0u32, 1, 10).is_err());
+        assert!(in_range("X", -1i64, 0, 10).is_err());
+        assert!(in_range("X", u64::MAX, 1, 10).is_err());
+        assert!(in_range("X", 11usize, 1, 10).is_err());
     }
 
     #[test]
