@@ -11,5 +11,10 @@ pub fn ingest_governor(config: &Config, jwt_secret: &str) -> IngestGovernor {
         .burst_size(config.ingest_rate_limit_burst)
         .use_headers()
         .finish()
-        .expect("governor ratelimit failed to build")
+        .unwrap_or_else(|| {
+            iono_core::bootstrap::fatal(
+                "build the ingest rate limiter",
+                &"INGEST_RATE_LIMIT_* values must be greater than zero",
+            )
+        })
 }

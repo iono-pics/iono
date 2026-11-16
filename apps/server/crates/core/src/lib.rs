@@ -17,6 +17,7 @@ pub mod rate_limit;
 pub mod state;
 pub mod storage;
 pub mod telemetry;
+pub mod trusted_proxy;
 pub mod urls;
 pub mod validators;
 pub mod web;

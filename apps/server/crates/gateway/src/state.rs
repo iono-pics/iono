@@ -1,4 +1,5 @@
 use iono_core::{
+    auth::login_throttle::LoginThrottle,
     cloudflare::CloudflareClient,
     crypto::Keyring,
     deletion::Deleter,
@@ -20,6 +21,7 @@ pub struct AppState {
     pub stripe: Option<stripe::Client>,
     pub config: Config,
     pub webauthn: Webauthn,
+    pub login_throttle: LoginThrottle,
     /// seals totp secrets at rest
     pub keyring: Keyring,
 }

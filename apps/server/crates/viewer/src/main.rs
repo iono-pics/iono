@@ -1,10 +1,6 @@
-use actix_web::{
-    body::MessageBody,
-    dev::{ServiceRequest, ServiceResponse},
-    web, App, Error, HttpServer,
-};
-use tracing::Span;
-use tracing_actix_web::{DefaultRootSpanBuilder, RootSpanBuilder, TracingLogger};
+use actix_web::{web, App, HttpServer};
+use iono_core::web::PathOnlyRootSpan;
+use tracing_actix_web::TracingLogger;
 
 mod cache;
 mod csp;
@@ -14,27 +10,6 @@ mod state;
 mod unlock;
 
 use state::AppState;
-
-// file passwords are in query string so spans must only record the path
-struct PathOnlyRootSpan;
-
-impl RootSpanBuilder for PathOnlyRootSpan {
-    fn on_request_start(request: &ServiceRequest) -> Span {
-        tracing::info_span!(
-            "HTTP request",
-            http.method = %request.method(),
-            http.target = %request.uri().path(),
-            http.status_code = tracing::field::Empty,
-            otel.status_code = tracing::field::Empty,
-            exception.message = tracing::field::Empty,
-            exception.details = tracing::field::Empty,
-        )
-    }
-
-    fn on_request_end<B: MessageBody>(span: Span, outcome: &Result<ServiceResponse<B>, Error>) {
-        DefaultRootSpanBuilder::on_request_end(span, outcome);
-    }
-}
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -48,13 +23,19 @@ async fn main() -> std::io::Result<()> {
     tracing::info!("iono-viewer listening on http://{}:{}", host, port);
 
     let state = web::Data::new(state);
+    let proxies = web::Data::new(config.trusted_proxies.clone());
 
     HttpServer::new(move || {
         App::new()
+            .wrap(iono_core::web::baseline_headers())
             .wrap(TracingLogger::<PathOnlyRootSpan>::new())
             .app_data(state.clone())
+            .app_data(proxies.clone())
             .configure(routes::configure)
     })
+    .client_request_timeout(iono_core::web::CLIENT_REQUEST_TIMEOUT)
+    .client_disconnect_timeout(iono_core::web::CLIENT_DISCONNECT_TIMEOUT)
+    .max_connections(iono_core::web::MAX_CONNECTIONS_PER_WORKER)
     .bind((host, port))?
     .run()
     .await

@@ -2,32 +2,44 @@ use actix_governor::{KeyExtractor, SimpleKeyExtractionError};
 use actix_web::{
     dev::ServiceRequest,
     http::header::{self, HeaderMap},
-    HttpRequest,
+    web, HttpRequest,
 };
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 use std::sync::Arc;
 
 use crate::auth::jwt;
+use crate::trusted_proxy::TrustedProxies;
 
+/// the client address. `cf-connecting-ip` is read only when the socket peer is
+/// in the [`TrustedProxies`] registered as app data
 pub fn client_ip(req: &ServiceRequest) -> Option<IpAddr> {
-    ip_from(req.headers(), req.peer_addr())
+    let proxies = req.app_data::<web::Data<TrustedProxies>>();
+    ip_from(req.headers(), req.peer_addr(), proxies.map(|p| p.get_ref()))
 }
 
 /// client_ip for handlers, which see an HttpRequest
 pub fn request_ip(req: &HttpRequest) -> Option<IpAddr> {
-    ip_from(req.headers(), req.peer_addr())
+    let proxies = req.app_data::<web::Data<TrustedProxies>>();
+    ip_from(req.headers(), req.peer_addr(), proxies.map(|p| p.get_ref()))
 }
 
-fn ip_from(headers: &HeaderMap, peer: Option<std::net::SocketAddr>) -> Option<IpAddr> {
-    if let Some(ip) = headers
-        .get("cf-connecting-ip")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse::<IpAddr>().ok())
-    {
-        return Some(ip);
+fn ip_from(
+    headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
+    proxies: Option<&TrustedProxies>,
+) -> Option<IpAddr> {
+    let peer = peer?.ip();
+    if proxies.is_some_and(|p| p.is_trusted(peer)) {
+        if let Some(ip) = headers
+            .get("cf-connecting-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<IpAddr>().ok())
+        {
+            return Some(ip);
+        }
     }
-    peer.map(|addr| addr.ip())
+    Some(peer)
 }
 
 #[derive(Clone)]
@@ -134,10 +146,16 @@ mod tests {
         assert!(!key.contains("abc"), "{key}");
     }
 
+    fn behind_proxy() -> TestRequest {
+        TestRequest::default()
+            .peer_addr("10.0.0.1:443".parse().unwrap())
+            .app_data(web::Data::new(TrustedProxies::parse("10.0.0.0/8").unwrap()))
+    }
+
     #[test]
     fn unauthenticated_requests_fall_back_to_ip() {
-        let a = key(TestRequest::default().insert_header(("cf-connecting-ip", "1.1.1.1")));
-        let b = key(TestRequest::default().insert_header(("cf-connecting-ip", "2.2.2.2")));
+        let a = key(behind_proxy().insert_header(("cf-connecting-ip", "1.1.1.1")));
+        let b = key(behind_proxy().insert_header(("cf-connecting-ip", "2.2.2.2")));
 
         assert_eq!(a, "i:1.1.1.1");
         assert_ne!(a, b);
@@ -145,11 +163,37 @@ mod tests {
 
     #[test]
     fn an_empty_bearer_is_not_a_credential() {
-        let key = key(TestRequest::default()
+        let key = key(behind_proxy()
             .insert_header((header::AUTHORIZATION, "Bearer "))
             .insert_header(("cf-connecting-ip", "1.1.1.1")));
 
         assert_eq!(key, "i:1.1.1.1");
+    }
+
+    #[test]
+    fn a_forwarded_ip_from_an_untrusted_peer_is_ignored() {
+        let key = key(TestRequest::default()
+            .peer_addr("203.0.113.7:5000".parse().unwrap())
+            .app_data(web::Data::new(TrustedProxies::parse("10.0.0.0/8").unwrap()))
+            .insert_header(("cf-connecting-ip", "9.9.9.9")));
+
+        assert_eq!(key, "i:203.0.113.7");
+    }
+
+    #[test]
+    fn no_configured_proxies_means_no_forwarded_ip_is_trusted() {
+        let key = key(TestRequest::default()
+            .peer_addr("10.0.0.1:443".parse().unwrap())
+            .insert_header(("cf-connecting-ip", "9.9.9.9")));
+
+        assert_eq!(key, "i:10.0.0.1");
+    }
+
+    #[test]
+    fn a_trusted_proxy_with_a_malformed_header_keys_by_the_peer() {
+        let key = key(behind_proxy().insert_header(("cf-connecting-ip", "not-an-ip")));
+
+        assert_eq!(key, "i:10.0.0.1");
     }
 
     #[test]
@@ -190,10 +234,8 @@ mod tests {
     }
 
     #[test]
-    fn cf_connecting_ip_wins_over_peer_addr() {
-        let key = key(TestRequest::default()
-            .insert_header(("cf-connecting-ip", "9.9.9.9"))
-            .peer_addr("1.2.3.4:5678".parse().unwrap()));
+    fn cf_connecting_ip_wins_over_a_trusted_peer_addr() {
+        let key = key(behind_proxy().insert_header(("cf-connecting-ip", "9.9.9.9")));
 
         assert_eq!(key, "i:9.9.9.9");
     }

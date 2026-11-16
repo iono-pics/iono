@@ -1,8 +1,10 @@
 use actix_cors::Cors;
 use actix_web::{
-    dev::Payload,
+    body::MessageBody,
+    dev::{Payload, ServiceRequest, ServiceResponse},
     http::{header, Method, StatusCode},
-    web, FromRequest, HttpRequest, HttpResponse, ResponseError,
+    middleware::DefaultHeaders,
+    web, Error, FromRequest, HttpRequest, HttpResponse, ResponseError,
 };
 use actix_web_httpauth::extractors::bearer::BearerAuth;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
@@ -10,7 +12,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::json;
 use std::fmt;
 use std::future::Future;
+use tracing::Span;
+use tracing_actix_web::{DefaultRootSpanBuilder, RootSpanBuilder};
 
+use crate::config::Config;
 use crate::error::AppError;
 
 #[derive(Debug, Clone, Default)]
@@ -105,11 +110,24 @@ impl ResponseError for ApiError {
     fn error_response(&self) -> HttpResponse {
         let status = self.status_code();
         if status == StatusCode::INTERNAL_SERVER_ERROR {
-            tracing::error!(error = %self.0, "internal error");
+            tracing::error!(error = %error_chain(&self.0), "internal error");
             return HttpResponse::build(status).json(json!({ "error": "internal server error" }));
         }
         HttpResponse::build(status).json(json!({ "error": self.0.to_string() }))
     }
+}
+
+/// the error and each of its sources, outermost first, so a log line shows
+/// the root cause and not just the wrapper message
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut out = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        out.push_str(": ");
+        out.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    out
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
@@ -120,12 +138,82 @@ pub fn app_state<T: 'static>(req: &HttpRequest) -> Result<web::Data<T>, ApiError
         .ok_or_else(|| ApiError(AppError::internal("AppState not registered")))
 }
 
-pub fn cors(methods: impl IntoIterator<Item = Method>) -> Cors {
-    Cors::default()
-        .allow_any_origin()
+/// allows only `CORS_ALLOWED_ORIGINS`, and no origin when it is empty
+pub fn cors(config: &Config, methods: impl IntoIterator<Item = Method>) -> Cors {
+    config
+        .cors_allowed_origins
+        .iter()
+        .fold(Cors::default(), |cors, origin| cors.allowed_origin(origin))
         .allowed_methods(methods)
         .allowed_headers(vec![header::AUTHORIZATION, header::CONTENT_TYPE])
         .max_age(3600)
+}
+
+/// headers for every response, including pages that set their own cache policy
+pub fn baseline_headers() -> DefaultHeaders {
+    DefaultHeaders::new()
+        .add((header::X_CONTENT_TYPE_OPTIONS, "nosniff"))
+        .add((header::REFERRER_POLICY, "no-referrer"))
+}
+
+/// headers for json api responses, which are never cached or rendered
+pub fn security_headers() -> DefaultHeaders {
+    baseline_headers()
+        .add((header::CACHE_CONTROL, "no-store"))
+        .add((
+            header::CONTENT_SECURITY_POLICY,
+            "default-src 'none'; frame-ancestors 'none'",
+        ))
+}
+
+/// the largest json body any endpoint takes: a paste at the size limit with
+/// every byte escaped to six, plus room for the other fields
+pub fn max_json_body_bytes(config: &Config) -> usize {
+    config
+        .max_paste_content_bytes
+        .saturating_mul(6)
+        .saturating_add(64 * 1024)
+}
+
+/// json bodies over [`max_json_body_bytes`] are refused with 413
+pub fn json_config(config: &Config) -> web::JsonConfig {
+    web::JsonConfig::default().limit(max_json_body_bytes(config))
+}
+
+/// the same cap for the `Bytes` and `String` extractors
+pub fn payload_config(config: &Config) -> web::PayloadConfig {
+    web::PayloadConfig::new(max_json_body_bytes(config))
+}
+
+/// how long a client may take to send its request head
+pub const CLIENT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// how long a disconnecting client may keep a connection open
+pub const CLIENT_DISCONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// open connections per worker
+pub const MAX_CONNECTIONS_PER_WORKER: usize = 2048;
+
+/// records the request path only, since query strings can carry passwords and
+/// decryption keys
+pub struct PathOnlyRootSpan;
+
+impl RootSpanBuilder for PathOnlyRootSpan {
+    fn on_request_start(request: &ServiceRequest) -> Span {
+        tracing::info_span!(
+            "HTTP request",
+            http.method = %request.method(),
+            http.target = %request.uri().path(),
+            http.status_code = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+            exception.message = tracing::field::Empty,
+            exception.details = tracing::field::Empty,
+        )
+    }
+
+    fn on_request_end<B: MessageBody>(span: Span, outcome: &Result<ServiceResponse<B>, Error>) {
+        DefaultRootSpanBuilder::on_request_end(span, outcome);
+    }
 }
 
 pub fn append_password_query(base: &str, password: Option<&str>) -> String {

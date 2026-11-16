@@ -2,9 +2,17 @@ use std::env;
 
 use secrecy::{ExposeSecret, SecretString};
 
+use crate::trusted_proxy::TrustedProxies;
+
+const MIN_SECRET_LEN: usize = 32;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub host: String,
+    /// proxies whose `cf-connecting-ip` header is believed
+    pub trusted_proxies: TrustedProxies,
+    /// origins browsers may call the api from
+    pub cors_allowed_origins: Vec<String>,
     pub gateway_port: u16,
     pub ingest_port: u16,
     pub viewer_port: u16,
@@ -70,183 +78,233 @@ pub struct Config {
     pub discord_success_redirect_url: Option<String>,
 }
 
+/// why the environment could not be turned into a [`Config`]
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("{0} must be set")]
+    Missing(&'static str),
+
+    #[error("{0} malformed")]
+    Malformed(&'static str),
+
+    #[error("{0} must be at least {1} characters")]
+    TooShort(&'static str, usize),
+
+    #[error("FILE_ENCRYPTION_KEY malformed")]
+    EncryptionKey(#[source] crate::crypto::KeyError),
+
+    #[error("file encryption keys malformed")]
+    Keyring(#[source] crate::error::AppError),
+}
+
 impl Config {
-    pub fn keyring(&self) -> crate::crypto::Keyring {
+    /// builds the keyring from the configured current and previous keys
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a key is not hex, is the wrong length, or a
+    /// version is defined twice. [`Config::from_env`] already checks this, so
+    /// it only fails on a `Config` built by hand.
+    pub fn keyring(&self) -> Result<crate::crypto::Keyring, crate::error::AppError> {
         crate::crypto::Keyring::new(
             self.file_encryption_key_version,
             self.file_encryption_key.expose_secret(),
             self.file_encryption_previous_keys.expose_secret(),
         )
-        .expect("file encryption keys malformed")
     }
 
-    pub fn from_env() -> Self {
-        Self {
-            host: env_or("HOST", "0.0.0.0"),
-            gateway_port: env_or("GATEWAY_PORT", "8080")
-                .parse()
-                .expect("GATEWAY_PORT malformed"),
-            ingest_port: env_or("INGEST_PORT", "8081")
-                .parse()
-                .expect("INGEST_PORT malformed"),
-            viewer_port: env_or("VIEWER_PORT", "8082")
-                .parse()
-                .expect("VIEWER_PORT malformed"),
-            janitor_port: env_or("JANITOR_PORT", "8083")
-                .parse()
-                .expect("JANITOR_PORT malformed"),
-            maintenance_token: env::var("MAINTENANCE_TOKEN")
-                .ok()
-                .filter(|s| !s.is_empty())
+    /// reads the configuration from environment variables
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConfigError`] naming the first variable that is missing or
+    /// malformed.
+    pub fn from_env() -> Result<Self, ConfigError> {
+        let config = Self {
+            host: env_or("HOST", "127.0.0.1"),
+            trusted_proxies: TrustedProxies::parse(&env_or("TRUSTED_PROXY_CIDRS", ""))
+                .map_err(|_| ConfigError::Malformed("TRUSTED_PROXY_CIDRS"))?,
+            cors_allowed_origins: parse_origins(&env_or("CORS_ALLOWED_ORIGINS", ""))?,
+            gateway_port: env_parse("GATEWAY_PORT", "8080")?,
+            ingest_port: env_parse("INGEST_PORT", "8081")?,
+            viewer_port: env_parse("VIEWER_PORT", "8082")?,
+            janitor_port: env_parse("JANITOR_PORT", "8083")?,
+            maintenance_token: env_optional("MAINTENANCE_TOKEN")
+                .map(|token| min_len("MAINTENANCE_TOKEN", token))
+                .transpose()?
                 .map(SecretString::from),
 
-            database_url: env_secret_or("DATABASE_URL", "postgres://iono:iono@localhost:5432/iono"),
-            database_max_connections: env_or("DATABASE_MAX_CONNECTIONS", "10")
-                .parse()
-                .expect("DATABASE_MAX_CONNECTIONS malformed"),
+            database_url: SecretString::from(env_required("DATABASE_URL")?),
+            database_max_connections: env_parse("DATABASE_MAX_CONNECTIONS", "10")?,
 
             s3_bucket: env_or("S3_BUCKET", "iono-uploads"),
             s3_region: env_or("S3_REGION", "auto"),
-            s3_endpoint: env::var("S3_ENDPOINT").ok().filter(|s| !s.is_empty()),
-            s3_access_key_id: env_or("S3_ACCESS_KEY_ID", ""),
-            s3_secret_access_key: env_secret_or("S3_SECRET_ACCESS_KEY", ""),
+            s3_endpoint: env_optional("S3_ENDPOINT"),
+            s3_access_key_id: env_required("S3_ACCESS_KEY_ID")?,
+            s3_secret_access_key: SecretString::from(env_required("S3_SECRET_ACCESS_KEY")?),
 
-            jwt_secret: SecretString::from(
-                env::var("JWT_SECRET")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .expect("JWT_SECRET must be set"),
-            ),
-            jwt_access_ttl_minutes: env_or("JWT_ACCESS_TTL_MINUTES", "15")
-                .parse()
-                .expect("JWT_ACCESS_TTL_MINUTES malformed"),
-            refresh_token_ttl_days: env_or("REFRESH_TOKEN_TTL_DAYS", "30")
-                .parse()
-                .expect("REFRESH_TOKEN_TTL_DAYS malformed"),
+            jwt_secret: SecretString::from(min_len("JWT_SECRET", env_required("JWT_SECRET")?)?),
+            jwt_access_ttl_minutes: env_parse("JWT_ACCESS_TTL_MINUTES", "15")?,
+            refresh_token_ttl_days: env_parse("REFRESH_TOKEN_TTL_DAYS", "30")?,
 
-            auth_rate_limit_seconds_per_request: env_or("AUTH_RATE_LIMIT_SECONDS_PER_REQUEST", "2")
-                .parse()
-                .expect("AUTH_RATE_LIMIT_SECONDS_PER_REQUEST malformed"),
-            auth_rate_limit_burst: env_or("AUTH_RATE_LIMIT_BURST", "5")
-                .parse()
-                .expect("AUTH_RATE_LIMIT_BURST malformed"),
-            ingest_rate_limit_seconds_per_request: env_or(
+            auth_rate_limit_seconds_per_request: env_parse(
+                "AUTH_RATE_LIMIT_SECONDS_PER_REQUEST",
+                "2",
+            )?,
+            auth_rate_limit_burst: env_parse("AUTH_RATE_LIMIT_BURST", "5")?,
+            ingest_rate_limit_seconds_per_request: env_parse(
                 "INGEST_RATE_LIMIT_SECONDS_PER_REQUEST",
                 "1",
-            )
-            .parse()
-            .expect("INGEST_RATE_LIMIT_SECONDS_PER_REQUEST malformed"),
-            ingest_rate_limit_burst: env_or("INGEST_RATE_LIMIT_BURST", "30")
-                .parse()
-                .expect("INGEST_RATE_LIMIT_BURST malformed"),
+            )?,
+            ingest_rate_limit_burst: env_parse("INGEST_RATE_LIMIT_BURST", "30")?,
 
             file_encryption_key: SecretString::from({
-                let key = env::var("FILE_ENCRYPTION_KEY")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .expect("FILE_ENCRYPTION_KEY must be set");
-                crate::crypto::parse_key(&key).expect("FILE_ENCRYPTION_KEY malformed");
+                let key = env_required("FILE_ENCRYPTION_KEY")?;
+                crate::crypto::parse_key(&key).map_err(ConfigError::EncryptionKey)?;
                 key
             }),
-            file_encryption_key_version: env_or("FILE_ENCRYPTION_KEY_VERSION", "1")
-                .parse()
-                .expect("FILE_ENCRYPTION_KEY_VERSION malformed"),
+            file_encryption_key_version: env_parse("FILE_ENCRYPTION_KEY_VERSION", "1")?,
             file_encryption_previous_keys: env_secret_or("FILE_ENCRYPTION_PREVIOUS_KEYS", ""),
 
-            recovery_window_days: env_or("RECOVERY_WINDOW_DAYS", "30")
-                .parse()
-                .expect("RECOVERY_WINDOW_DAYS malformed"),
-            totp_recovery_code_count: env_or("TOTP_RECOVERY_CODE_COUNT", "10")
-                .parse()
-                .expect("TOTP_RECOVERY_CODE_COUNT malformed"),
-            oauth_flow_state_ttl_minutes: env_or("OAUTH_FLOW_STATE_TTL_MINUTES", "15")
-                .parse()
-                .expect("OAUTH_FLOW_STATE_TTL_MINUTES malformed"),
-            webauthn_ceremony_ttl_minutes: env_or("WEBAUTHN_CEREMONY_TTL_MINUTES", "5")
-                .parse()
-                .expect("WEBAUTHN_CEREMONY_TTL_MINUTES malformed"),
+            recovery_window_days: env_parse("RECOVERY_WINDOW_DAYS", "30")?,
+            totp_recovery_code_count: env_parse("TOTP_RECOVERY_CODE_COUNT", "10")?,
+            oauth_flow_state_ttl_minutes: env_parse("OAUTH_FLOW_STATE_TTL_MINUTES", "15")?,
+            webauthn_ceremony_ttl_minutes: env_parse("WEBAUTHN_CEREMONY_TTL_MINUTES", "5")?,
 
-            max_paste_content_bytes: env_or("MAX_PASTE_SIZE_KB", "1024")
-                .parse::<usize>()
-                .expect("MAX_PASTE_SIZE_KB malformed")
-                * 1024,
+            max_paste_content_bytes: env_scaled("MAX_PASTE_SIZE_KB", "1024", KIB)?,
 
-            sweep_batch_size: env_or("SWEEP_BATCH_SIZE", "500")
-                .parse()
-                .expect("SWEEP_BATCH_SIZE malformed"),
-            encrypt_backfill_batch_size: env_or("ENCRYPT_BACKFILL_BATCH_SIZE", "100")
-                .parse()
-                .expect("ENCRYPT_BACKFILL_BATCH_SIZE malformed"),
-            encrypt_backfill_max_object_bytes: env_or("ENCRYPT_BACKFILL_MAX_OBJECT_MB", "10240")
-                .parse::<i64>()
-                .expect("ENCRYPT_BACKFILL_MAX_OBJECT_MB malformed")
-                * 1024
-                * 1024,
+            sweep_batch_size: env_parse("SWEEP_BATCH_SIZE", "500")?,
+            encrypt_backfill_batch_size: env_parse("ENCRYPT_BACKFILL_BATCH_SIZE", "100")?,
+            encrypt_backfill_max_object_bytes: env_scaled(
+                "ENCRYPT_BACKFILL_MAX_OBJECT_MB",
+                "10240",
+                MIB,
+            )?,
 
-            browser_cache_max_age_seconds: env_or("BROWSER_CACHE_MAX_AGE_SECONDS", "300")
-                .parse()
-                .expect("BROWSER_CACHE_MAX_AGE_SECONDS malformed"),
-            edge_cache_max_age_seconds: env_or("EDGE_CACHE_MAX_AGE_SECONDS", "31536000")
-                .parse()
-                .expect("EDGE_CACHE_MAX_AGE_SECONDS malformed"),
+            browser_cache_max_age_seconds: env_parse("BROWSER_CACHE_MAX_AGE_SECONDS", "300")?,
+            edge_cache_max_age_seconds: env_parse("EDGE_CACHE_MAX_AGE_SECONDS", "31536000")?,
 
-            webauthn_rp_id: env_or("WEBAUTHN_RP_ID", "localhost"),
-            webauthn_rp_origin: env_or("WEBAUTHN_RP_ORIGIN", "http://localhost:5173"),
+            webauthn_rp_id: env_required("WEBAUTHN_RP_ID")?,
+            webauthn_rp_origin: env_required("WEBAUTHN_RP_ORIGIN")?,
 
             public_ingest_url: env_url_or("PUBLIC_INGEST_URL", "http://localhost:8081"),
 
-            max_upload_size_bytes: env_or("MAX_UPLOAD_SIZE_MB", "10240")
-                .parse::<usize>()
-                .expect("MAX_UPLOAD_SIZE_MB malformed")
-                * 1024
-                * 1024,
+            max_upload_size_bytes: env_scaled("MAX_UPLOAD_SIZE_MB", "10240", MIB)?,
 
-            max_image_decode_bytes: env_or("MAX_IMAGE_DECODE_SIZE_MB", "32")
-                .parse::<usize>()
-                .expect("MAX_IMAGE_DECODE_SIZE_MB malformed")
-                * 1024
-                * 1024,
+            max_image_decode_bytes: env_scaled("MAX_IMAGE_DECODE_SIZE_MB", "32", MIB)?,
 
-            cloudflare_zone_id: env::var("CLOUDFLARE_ZONE_ID")
-                .ok()
-                .filter(|s| !s.is_empty()),
-            cloudflare_api_token: env::var("CLOUDFLARE_API_TOKEN")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .map(SecretString::from),
+            cloudflare_zone_id: env_optional("CLOUDFLARE_ZONE_ID"),
+            cloudflare_api_token: env_optional("CLOUDFLARE_API_TOKEN").map(SecretString::from),
 
-            stripe_api_key: env::var("STRIPE_API_KEY")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .map(SecretString::from),
-            stripe_portal_return_url: env::var("STRIPE_PORTAL_RETURN_URL")
-                .ok()
-                .filter(|s| !s.is_empty())
+            stripe_api_key: env_optional("STRIPE_API_KEY").map(SecretString::from),
+            stripe_portal_return_url: env_optional("STRIPE_PORTAL_RETURN_URL")
                 .map(|s| s.trim_end_matches('/').to_string()),
 
-            discord_client_id: env::var("DISCORD_CLIENT_ID").ok().filter(|s| !s.is_empty()),
-            discord_client_secret: env::var("DISCORD_CLIENT_SECRET")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .map(SecretString::from),
-            discord_redirect_uri: env::var("DISCORD_REDIRECT_URI")
-                .ok()
-                .filter(|s| !s.is_empty()),
-            discord_success_redirect_url: env::var("DISCORD_SUCCESS_REDIRECT_URL")
-                .ok()
-                .filter(|s| !s.is_empty()),
-        }
+            discord_client_id: env_optional("DISCORD_CLIENT_ID"),
+            discord_client_secret: env_optional("DISCORD_CLIENT_SECRET").map(SecretString::from),
+            discord_redirect_uri: env_optional("DISCORD_REDIRECT_URI"),
+            discord_success_redirect_url: env_optional("DISCORD_SUCCESS_REDIRECT_URL"),
+        };
+
+        // fail at startup on a bad previous key too, not on the first request
+        config.keyring().map_err(ConfigError::Keyring)?;
+        Ok(config)
     }
 }
 
+const KIB: u64 = 1024;
+const MIB: u64 = 1024 * 1024;
+
 fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+fn env_optional(key: &str) -> Option<String> {
+    env::var(key).ok().filter(|s| !s.is_empty())
+}
+
+fn env_required(key: &'static str) -> Result<String, ConfigError> {
+    env_optional(key).ok_or(ConfigError::Missing(key))
+}
+
+fn env_parse<T: std::str::FromStr>(key: &'static str, default: &str) -> Result<T, ConfigError> {
+    env_or(key, default)
+        .parse()
+        .map_err(|_| ConfigError::Malformed(key))
+}
+
+/// a whole number of `unit`s, as a byte count that fits `T`
+fn env_scaled<T: TryFrom<u64>>(
+    key: &'static str,
+    default: &str,
+    unit: u64,
+) -> Result<T, ConfigError> {
+    let count: u64 = env_parse(key, default)?;
+    count
+        .checked_mul(unit)
+        .and_then(|bytes| T::try_from(bytes).ok())
+        .ok_or(ConfigError::Malformed(key))
 }
 
 fn env_secret_or(key: &str, default: &str) -> SecretString {
     SecretString::from(env_or(key, default))
 }
 
+fn min_len(key: &'static str, value: String) -> Result<String, ConfigError> {
+    if value.len() < MIN_SECRET_LEN {
+        return Err(ConfigError::TooShort(key, MIN_SECRET_LEN));
+    }
+    Ok(value)
+}
+
+/// a comma separated list of `scheme://host[:port]` origins
+fn parse_origins(list: &str) -> Result<Vec<String>, ConfigError> {
+    list.split(',')
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty())
+        .map(|origin| {
+            let authority = origin
+                .strip_prefix("https://")
+                .or_else(|| origin.strip_prefix("http://"))
+                .filter(|rest| !rest.is_empty() && !rest.contains(['/', '?', '#', '*', '@', ' ']));
+            authority
+                .map(|_| origin.to_owned())
+                .ok_or(ConfigError::Malformed("CORS_ALLOWED_ORIGINS"))
+        })
+        .collect()
+}
+
 fn env_url_or(key: &str, default: &str) -> String {
     env_or(key, default).trim_end_matches('/').to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn origins_must_be_bare_scheme_and_host() {
+        assert_eq!(
+            parse_origins("https://app.example.com, http://localhost:5173").unwrap(),
+            ["https://app.example.com", "http://localhost:5173"]
+        );
+        assert!(parse_origins("").unwrap().is_empty());
+        for bad in [
+            "*",
+            "app.example.com",
+            "https://app.example.com/",
+            "https://*.example.com",
+            "https://user@app.example.com",
+            "null",
+            "https://",
+        ] {
+            assert!(parse_origins(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn short_secrets_are_refused() {
+        assert!(min_len("JWT_SECRET", "short".into()).is_err());
+        assert!(min_len("JWT_SECRET", "x".repeat(MIN_SECRET_LEN)).is_ok());
+    }
 }

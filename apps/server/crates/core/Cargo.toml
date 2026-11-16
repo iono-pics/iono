@@ -44,6 +44,7 @@ dotenvy.workspace = true
 
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tracing-actix-web.workspace = true
 
 infer.workspace = true
 image.workspace = true

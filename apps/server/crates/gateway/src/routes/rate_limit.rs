@@ -11,5 +11,10 @@ pub fn auth_governor(config: &Config) -> AuthGovernor {
         .burst_size(config.auth_rate_limit_burst)
         .use_headers()
         .finish()
-        .expect("governor ratelimit failed to build")
+        .unwrap_or_else(|| {
+            iono_core::bootstrap::fatal(
+                "build the auth rate limiter",
+                &"AUTH_RATE_LIMIT_* values must be greater than zero",
+            )
+        })
 }

@@ -1,9 +1,12 @@
+use actix_governor::{Governor, GovernorConfigBuilder};
 use actix_web::{web, App, HttpServer};
 use std::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing_actix_web::TracingLogger;
 
-use iono_core::{cloudflare::CloudflareClient, state::CoreState};
+use iono_core::{
+    bootstrap::fatal, cloudflare::CloudflareClient, state::CoreState, web::PathOnlyRootSpan,
+};
 
 mod routes;
 mod state;
@@ -14,10 +17,9 @@ use state::AppState;
 async fn main() -> std::io::Result<()> {
     let config = iono_core::bootstrap::init_config();
 
-    let maintenance_token = config
-        .maintenance_token
-        .clone()
-        .expect("MAINTENANCE_TOKEN must be set");
+    let Some(maintenance_token) = config.maintenance_token.clone() else {
+        fatal("read the configuration", &"MAINTENANCE_TOKEN must be set");
+    };
 
     let core = CoreState::build(&config).await;
 
@@ -30,7 +32,7 @@ async fn main() -> std::io::Result<()> {
         .worker_threads(1)
         .enable_all()
         .build()
-        .expect("failed to build background runtime");
+        .unwrap_or_else(|e| fatal("build the background runtime", &e));
 
     tracing::info!("iono-janitor listening on http://{}:{}", host, port);
 
@@ -49,12 +51,23 @@ async fn main() -> std::io::Result<()> {
     });
     let state_after = state.clone();
 
+    let governor = GovernorConfigBuilder::default()
+        .seconds_per_request(1)
+        .burst_size(5)
+        .finish()
+        .unwrap_or_else(|| fatal("build the janitor rate limiter", &"invalid rate limit"));
+
     HttpServer::new(move || {
         App::new()
-            .wrap(TracingLogger::default())
+            .wrap(Governor::new(&governor))
+            .wrap(iono_core::web::security_headers())
+            .wrap(TracingLogger::<PathOnlyRootSpan>::new())
             .app_data(state.clone())
             .configure(routes::configure)
     })
+    .client_request_timeout(iono_core::web::CLIENT_REQUEST_TIMEOUT)
+    .client_disconnect_timeout(iono_core::web::CLIENT_DISCONNECT_TIMEOUT)
+    .max_connections(iono_core::web::MAX_CONNECTIONS_PER_WORKER)
     .workers(1)
     .bind((host, port))?
     .run()
@@ -68,7 +81,11 @@ async fn main() -> std::io::Result<()> {
 }
 
 async fn drain(slot: &Mutex<Option<JoinHandle<()>>>, name: &str) {
-    let task = slot.lock().unwrap().take();
+    // the slot only holds a handle, so a poisoned lock is still safe to use
+    let task = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
     let Some(task) = task else { return };
     if task.is_finished() {
         return;

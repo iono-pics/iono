@@ -86,7 +86,11 @@ pub async fn encrypt_backfill(state: web::Data<AppState>, auth: BearerAuth) -> H
             Err(e) => tracing::error!(error = %e, "encryption backfill aborted"),
         }
     });
-    *slot.backfill_task.lock().unwrap() = Some(task);
+    // the slot only holds a handle, so a poisoned lock is still safe to use
+    *slot
+        .backfill_task
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
 
     HttpResponse::Accepted().json(serde_json::json!({ "status": "backfill started" }))
 }
@@ -406,7 +410,7 @@ mod tests {
 
     async fn state() -> AppState {
         dotenvy::from_path("../../../.env").ok();
-        let config = Config::from_env();
+        let config = Config::from_env().expect("test config");
         AppState {
             core: CoreState::build(&config).await,
             cloudflare: iono_core::cloudflare::CloudflareClient::new(None, None),

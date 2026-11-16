@@ -20,7 +20,7 @@ unsafe_code = "forbid"
 [workspace.dependencies]
 iono-core = { path = "crates/core" }
 
-actix-web = "4"
+actix-web = "4.18.2"
 actix-multipart = "0.8.0"
 actix-governor = "0.7"
 actix-cors = "0.7"

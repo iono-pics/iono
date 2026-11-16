@@ -42,6 +42,20 @@ pub fn verify_password(plain: &str, hash: &str) -> Result<bool, AppError> {
         .is_ok())
 }
 
+static DUMMY_HASH: LazyLock<String> = LazyLock::new(|| {
+    hash_password("iono-dummy-password").unwrap_or_else(|e| {
+        tracing::error!(error = %e, "dummy password hash could not be built");
+        String::new()
+    })
+});
+
+/// spends the cost of a password check when there is no stored hash to check
+/// against, so a missing account takes as long as a wrong password
+pub async fn verify_against_dummy(plain: String) {
+    // the result is irrelevant, only the time spent matters
+    let _ = verify_password_async(plain, DUMMY_HASH.clone()).await;
+}
+
 pub async fn hash_password_async(plain: String) -> AppResult<String> {
     bounded(
         move || hash_password(&plain),

@@ -12,6 +12,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libssl3 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/target/release/iono-gateway /app/target/release/iono-ingest /app/target/release/iono-viewer /app/target/release/iono-janitor /usr/local/bin/
+ENV HOST=0.0.0.0
 EXPOSE 8080 8081 8082 8083
 COPY --chmod=755 entrypoint.sh /usr/local/bin/iono-entrypoint
 CMD ["iono-entrypoint"]

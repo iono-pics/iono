@@ -8,7 +8,7 @@ const BIG: usize = 20 * 1024 * 1024;
 
 async fn storage() -> S3Storage {
     dotenvy::from_path("../../../.env").ok();
-    S3Storage::new(&Config::from_env())
+    S3Storage::new(&Config::from_env().expect("test config"))
         .await
         .expect("could not reach the S3 endpoint")
 }

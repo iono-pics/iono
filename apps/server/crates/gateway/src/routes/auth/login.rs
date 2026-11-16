@@ -1,7 +1,11 @@
 use actix_web::{post, web, HttpRequest, HttpResponse};
 use iono_core::{
-    auth::{password::verify_password_async, refresh::SessionContext},
+    auth::{
+        password::{verify_against_dummy, verify_password_async},
+        refresh::SessionContext,
+    },
     entities::User,
+    rate_limit::request_ip,
     AppError,
 };
 use secrecy::ExposeSecret;
@@ -38,14 +42,19 @@ pub async fn login(
     state: web::Data<AppState>,
     body: web::Json<LoginRequest>,
 ) -> ApiResult<HttpResponse> {
+    state
+        .login_throttle
+        .check(&body.identifier, request_ip(&req))?;
+
     let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = $1 OR username = $1")
         .bind(&body.identifier)
         .fetch_optional(&state.db)
         .await
-        .map_err(AppError::from)?
-        .ok_or(AppError::Unauthorized)?;
+        .map_err(AppError::from)?;
 
-    let Some(password_hash) = user.password_hash.clone() else {
+    let password_hash = user.as_ref().and_then(|u| u.password_hash.clone());
+    let (Some(user), Some(password_hash)) = (user, password_hash) else {
+        verify_against_dummy(body.password.clone()).await;
         return Err(AppError::Unauthorized.into());
     };
 

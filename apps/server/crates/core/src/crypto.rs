@@ -35,6 +35,8 @@ pub fn random_nonce() -> String {
     hex::encode(bytes)
 }
 
+/// the key files are encrypted under now, plus the older keys still needed to
+/// read files written before a rotation
 #[derive(Debug, Clone)]
 pub struct Keyring {
     current_version: i16,
@@ -42,18 +44,28 @@ pub struct Keyring {
 }
 
 impl Keyring {
+    /// `previous` is a comma separated list of `version:hexkey` pairs
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when a key is not a valid 256 bit hex key,
+    /// a pair is malformed, or a version appears twice.
     pub fn new(current_version: i16, current: &str, previous: &str) -> AppResult<Self> {
+        let key_error = |e| AppError::internal_from("encryption key is invalid", e);
         let mut keys = HashMap::new();
-        keys.insert(current_version, parse_key(current)?);
+        keys.insert(current_version, parse_key(current).map_err(key_error)?);
 
         for entry in previous.split(',').map(str::trim).filter(|e| !e.is_empty()) {
             let (version, key) = entry.split_once(':').ok_or_else(|| {
                 AppError::internal("previous encryption keys must be version:hexkey pairs")
             })?;
-            let version: i16 = version.trim().parse().map_err(|_| {
-                AppError::internal("previous encryption key version is not a number")
+            let version: i16 = version.trim().parse().map_err(|e| {
+                AppError::internal_from("previous encryption key version is not a number", e)
             })?;
-            if keys.insert(version, parse_key(key)?).is_some() {
+            if keys
+                .insert(version, parse_key(key).map_err(key_error)?)
+                .is_some()
+            {
                 return Err(AppError::internal(format!(
                     "encryption key version {version} is defined twice"
                 )));
@@ -66,14 +78,22 @@ impl Keyring {
         })
     }
 
+    /// the version new files are encrypted under
     pub fn current_version(&self) -> i16 {
         self.current_version
     }
 
+    /// the key new files are encrypted under
     pub fn current(&self) -> &[u8; KEY_LEN] {
+        // `new` always inserts the current version
         &self.keys[&self.current_version]
     }
 
+    /// the key a file written under `version` needs
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when no key is configured for `version`.
     pub fn get(&self, version: i16) -> AppResult<&[u8; KEY_LEN]> {
         self.keys.get(&version).ok_or_else(|| {
             AppError::internal(format!(
@@ -83,12 +103,33 @@ impl Keyring {
     }
 }
 
-pub fn parse_key(hex_key: &str) -> AppResult<[u8; KEY_LEN]> {
-    let bytes = hex::decode(hex_key.trim())
-        .map_err(|_| AppError::BadRequest("encryption key must be hex".into()))?;
-    bytes
-        .try_into()
-        .map_err(|_| AppError::BadRequest(format!("encryption key must be {KEY_LEN} bytes")))
+/// why a hex encoded key could not be used
+#[derive(Debug, thiserror::Error)]
+pub enum KeyError {
+    #[error("encryption key must be hex")]
+    NotHex(#[source] hex::FromHexError),
+
+    #[error("encryption key must be 32 bytes")]
+    WrongLength,
+}
+
+/// a key a client sent is a bad request. a key from our own config is not, so
+/// startup code maps this itself instead of using the conversion
+impl From<KeyError> for AppError {
+    fn from(error: KeyError) -> Self {
+        AppError::BadRequest(error.to_string())
+    }
+}
+
+/// decodes a hex encoded 256 bit key
+///
+/// # Errors
+///
+/// Returns [`KeyError`] when the text is not hex or does not decode to
+/// [`KEY_LEN`] bytes.
+pub fn parse_key(hex_key: &str) -> Result<[u8; KEY_LEN], KeyError> {
+    let bytes = hex::decode(hex_key.trim()).map_err(KeyError::NotHex)?;
+    bytes.try_into().map_err(|_| KeyError::WrongLength)
 }
 
 pub struct Keystream(Aes256Ctr);
@@ -107,6 +148,8 @@ impl Keystream {
     }
 }
 
+/// several keystreams applied one after another, for format 1 files that
+/// were encrypted under both a server key and a user key
 pub struct Layers(Vec<Keystream>);
 
 impl Layers {
@@ -118,6 +161,7 @@ impl Layers {
         self.0.is_empty()
     }
 
+    /// applies every layer to `buf` in place
     pub fn apply(&mut self, buf: &mut [u8]) {
         for layer in self.0.iter_mut() {
             layer.apply(buf);
@@ -130,6 +174,12 @@ pub fn encrypt_buffer(key: &[u8; KEY_LEN], iv: &[u8; IV_LEN], buf: &mut [u8]) ->
     Ok(())
 }
 
+/// wraps a data key under a key encrypting key with unauthenticated ctr. only
+/// kept to read keys wrapped before [`seal_key`]
+///
+/// # Errors
+///
+/// Returns an internal error when the keystream cannot be set up.
 pub fn wrap_key(
     kek: &[u8; KEY_LEN],
     iv: &[u8; IV_LEN],
@@ -140,6 +190,11 @@ pub fn wrap_key(
     Ok(wrapped)
 }
 
+/// reverses [`wrap_key`]
+///
+/// # Errors
+///
+/// Returns an internal error when `wrapped` is not [`KEY_LEN`] bytes long.
 pub fn unwrap_key(
     kek: &[u8; KEY_LEN],
     iv: &[u8; IV_LEN],
@@ -151,10 +206,8 @@ pub fn unwrap_key(
     wrap_key(kek, iv, &wrapped)
 }
 
-// format 1 is aes-ctr: no integrity, a flipped ciphertext bit flips the same
-// plaintext bit. it is only read now, for files written before format 2
-
-/// how a files row's object is encrypted
+/// format 1 is aes-ctr: no integrity, a flipped ciphertext bit flips the same
+/// plaintext bit. it is only read now, for files written before format 2
 pub const FORMAT_CTR: i16 = 1;
 /// aes-256-gcm over fixed size segments, see Sealer
 pub const FORMAT_SEGMENTED_GCM: i16 = 2;
@@ -168,6 +221,10 @@ pub const WRAP_NONCE_LEN: usize = 12;
 
 /// the key a format 2 object is sealed under. a file with a user key needs
 /// both secrets, so one aead pass covers what used to be two ctr layers
+///
+/// this derivation is frozen: every stored format 2 object was sealed under
+/// its output, so changing it (to hkdf, say) makes them unreadable. a better
+/// kdf needs a new format number and a rewrite of existing objects
 pub fn content_key(
     dek: &[u8; KEY_LEN],
     salt: &[u8],
@@ -201,7 +258,7 @@ pub fn sealed_len(plain_len: u64) -> u64 {
 fn segment_nonce(index: u64, last: bool) -> [u8; 12] {
     let mut nonce = [0u8; 12];
     nonce[..8].copy_from_slice(&index.to_be_bytes());
-    nonce[11] = last as u8;
+    nonce[11] = u8::from(last);
     nonce
 }
 
@@ -301,13 +358,23 @@ pub struct SealedRange {
 }
 
 /// `start..=end` is a plaintext range inside a file of `plain_len` bytes
+///
+/// # Panics
+///
+/// Panics in debug builds, and computes a wrong range in release builds,
+/// unless `start <= end < plain_len`. callers must validate the range first,
+/// as the viewer's range parser does.
 pub fn sealed_range(plain_len: u64, start: u64, end: u64) -> SealedRange {
+    debug_assert!(start <= end && end < plain_len, "range is outside the file");
     let seg = SEGMENT_LEN as u64;
     let first_segment = start / seg;
     let last_segment = end / seg;
+    // the remainder is below SEGMENT_LEN, so it always fits a usize
+    #[allow(clippy::cast_possible_truncation)]
+    let skip = (start % seg) as usize;
     SealedRange {
         first_segment,
-        skip: (start - first_segment * seg) as usize,
+        skip,
         len: end - start + 1,
         sealed_start: first_segment * SEALED_SEGMENT_LEN as u64,
         sealed_end_inclusive: ((last_segment + 1) * SEALED_SEGMENT_LEN as u64)
@@ -331,11 +398,14 @@ pub struct Opener {
 impl Opener {
     pub fn new(key: &[u8; KEY_LEN], plain_len: u64, range: &SealedRange) -> Self {
         let last = segment_count(plain_len) - 1;
+        // the last segment holds at most SEGMENT_LEN bytes, so it fits a usize
+        #[allow(clippy::cast_possible_truncation)]
+        let last_plain_len = (plain_len - last * SEGMENT_LEN as u64) as usize;
         Self {
             cipher: gcm(key),
             next: range.first_segment,
             last,
-            last_sealed_len: (plain_len - last * SEGMENT_LEN as u64) as usize + TAG_LEN,
+            last_sealed_len: last_plain_len + TAG_LEN,
             pending: Vec::new(),
             skip: range.skip,
             remaining: range.len,

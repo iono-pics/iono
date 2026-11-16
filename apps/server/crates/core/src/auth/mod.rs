@@ -1,6 +1,7 @@
 pub mod api_key;
 pub mod authed;
 pub mod jwt;
+pub mod login_throttle;
 pub mod password;
 pub mod refresh;
 pub mod token;

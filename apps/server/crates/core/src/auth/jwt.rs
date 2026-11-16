@@ -1,4 +1,4 @@
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -12,6 +12,12 @@ const ACCESS_AUDIENCE: &str = "iono:access";
 const MFA_AUDIENCE: &str = "iono:mfa";
 const RESTORE_AUDIENCE: &str = "iono:restore";
 
+const MFA_TOKEN_PURPOSE: &str = "mfa_pending";
+const MFA_TOKEN_TTL_MINUTES: i64 = 5;
+
+const RESTORE_TOKEN_PURPOSE: &str = "restore_account";
+const RESTORE_TOKEN_TTL_MINUTES: i64 = 15;
+
 fn validation_for(audience: &str) -> Validation {
     let mut validation = Validation::default();
     validation.set_audience(&[audience]);
@@ -19,6 +25,7 @@ fn validation_for(audience: &str) -> Validation {
     validation
 }
 
+/// claims of an access token
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,
@@ -28,28 +35,110 @@ pub struct Claims {
     pub ver: i32,
 }
 
+/// claims of a short lived token that only authorises one step, such as
+/// finishing a login with a second factor or restoring a deleted account
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PurposeClaims {
+    pub sub: String,
+    pub aud: String,
+    pub iat: usize,
+    pub exp: usize,
+    pub purpose: String,
+}
+
+fn unix_seconds(time: DateTime<Utc>) -> Result<usize, AppError> {
+    usize::try_from(time.timestamp())
+        .map_err(|e| AppError::internal_from("token time is out of range", e))
+}
+
+/// the issue and expiry times for a token that lives `ttl_minutes`
+fn lifetime(ttl_minutes: i64) -> Result<(usize, usize), AppError> {
+    let now = Utc::now();
+    let expires = Duration::try_minutes(ttl_minutes)
+        .and_then(|ttl| now.checked_add_signed(ttl))
+        .ok_or_else(|| AppError::internal("token ttl is out of range"))?;
+    Ok((unix_seconds(now)?, unix_seconds(expires)?))
+}
+
+fn sign<T: Serialize>(claims: &T, secret: &str) -> Result<String, AppError> {
+    encode(
+        &Header::default(),
+        claims,
+        &EncodingKey::from_secret(secret.as_bytes()),
+    )
+    .map_err(|e| AppError::internal_from("jwt encode failed", e))
+}
+
+fn issue_purpose_token(
+    user_id: &str,
+    secret: &str,
+    audience: &str,
+    purpose: &str,
+    ttl_minutes: i64,
+) -> Result<String, AppError> {
+    let (iat, exp) = lifetime(ttl_minutes)?;
+    sign(
+        &PurposeClaims {
+            sub: user_id.to_string(),
+            aud: audience.to_string(),
+            iat,
+            exp,
+            purpose: purpose.to_string(),
+        },
+        secret,
+    )
+}
+
+fn verify_purpose_token(
+    token: &str,
+    secret: &str,
+    audience: &str,
+    purpose: &str,
+) -> Result<PurposeClaims, AppError> {
+    let claims = decode::<PurposeClaims>(
+        token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &validation_for(audience),
+    )
+    .map(|data| data.claims)
+    .map_err(|_| AppError::Unauthorized)?;
+
+    if claims.purpose != purpose {
+        return Err(AppError::Unauthorized);
+    }
+
+    Ok(claims)
+}
+
+/// signs an access token for `user_id` that lives `ttl_minutes`
+///
+/// # Errors
+///
+/// Returns an internal error when the ttl is out of range or signing fails.
 pub fn issue_access_token(
     user_id: &str,
     token_version: i32,
     secret: &str,
     ttl_minutes: i64,
 ) -> Result<String, AppError> {
-    let now = Utc::now();
-    let claims = Claims {
-        sub: user_id.to_string(),
-        aud: ACCESS_AUDIENCE.to_string(),
-        iat: now.timestamp() as usize,
-        exp: (now + Duration::minutes(ttl_minutes)).timestamp() as usize,
-        ver: token_version,
-    };
-    encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
+    let (iat, exp) = lifetime(ttl_minutes)?;
+    sign(
+        &Claims {
+            sub: user_id.to_string(),
+            aud: ACCESS_AUDIENCE.to_string(),
+            iat,
+            exp,
+            ver: token_version,
+        },
+        secret,
     )
-    .map_err(|e| AppError::internal_from("jwt encode failed", e))
 }
 
+/// checks the signature, expiry and audience of an access token
+///
+/// # Errors
+///
+/// Returns [`AppError::Unauthorized`] for any token that does not verify.
 pub fn verify_access_token(token: &str, secret: &str) -> Result<Claims, AppError> {
     decode::<Claims>(
         token,
@@ -60,6 +149,14 @@ pub fn verify_access_token(token: &str, secret: &str) -> Result<Claims, AppError
     .map_err(|_| AppError::Unauthorized)
 }
 
+/// resolves an access token to its user, refusing revoked tokens and
+/// deleted accounts
+///
+/// # Errors
+///
+/// Returns [`AppError::Unauthorized`] when the token does not verify, the user
+/// is gone or deleted, or the token version was revoked, and a database error
+/// when the lookup fails.
 pub async fn authenticate(db: &PgPool, secret: &str, access_token: &str) -> Result<User, AppError> {
     let claims = verify_access_token(access_token, secret)?;
 
@@ -81,83 +178,53 @@ pub async fn authenticate(db: &PgPool, secret: &str, access_token: &str) -> Resu
     Ok(user)
 }
 
-const MFA_TOKEN_PURPOSE: &str = "mfa_pending";
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct MfaClaims {
-    pub sub: String,
-    pub aud: String,
-    pub iat: usize,
-    pub exp: usize,
-    pub purpose: String,
-}
-
+/// signs the token that proves the password step of a login passed and a
+/// second factor is still owed
+///
+/// # Errors
+///
+/// Returns an internal error when signing fails.
 pub fn issue_mfa_token(user_id: &str, secret: &str) -> Result<String, AppError> {
-    let now = Utc::now();
-    let claims = MfaClaims {
-        sub: user_id.to_string(),
-        aud: MFA_AUDIENCE.to_string(),
-        iat: now.timestamp() as usize,
-        exp: (now + Duration::minutes(5)).timestamp() as usize,
-        purpose: MFA_TOKEN_PURPOSE.to_string(),
-    };
-    encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
+    issue_purpose_token(
+        user_id,
+        secret,
+        MFA_AUDIENCE,
+        MFA_TOKEN_PURPOSE,
+        MFA_TOKEN_TTL_MINUTES,
     )
-    .map_err(|e| AppError::internal_from("jwt encode failed", e))
 }
 
-pub fn verify_mfa_token(token: &str, secret: &str) -> Result<MfaClaims, AppError> {
-    let claims = decode::<MfaClaims>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &validation_for(MFA_AUDIENCE),
-    )
-    .map(|data| data.claims)
-    .map_err(|_| AppError::Unauthorized)?;
-
-    if claims.purpose != MFA_TOKEN_PURPOSE {
-        return Err(AppError::Unauthorized);
-    }
-
-    Ok(claims)
+/// checks a token from [`issue_mfa_token`]
+///
+/// # Errors
+///
+/// Returns [`AppError::Unauthorized`] for any token that does not verify.
+pub fn verify_mfa_token(token: &str, secret: &str) -> Result<PurposeClaims, AppError> {
+    verify_purpose_token(token, secret, MFA_AUDIENCE, MFA_TOKEN_PURPOSE)
 }
 
-const RESTORE_TOKEN_PURPOSE: &str = "restore_account";
-
+/// signs the token that lets a user restore a deleted account
+///
+/// # Errors
+///
+/// Returns an internal error when signing fails.
 pub fn issue_restore_token(user_id: &str, secret: &str) -> Result<String, AppError> {
-    let now = Utc::now();
-    let claims = MfaClaims {
-        sub: user_id.to_string(),
-        aud: RESTORE_AUDIENCE.to_string(),
-        iat: now.timestamp() as usize,
-        exp: (now + Duration::minutes(15)).timestamp() as usize,
-        purpose: RESTORE_TOKEN_PURPOSE.to_string(),
-    };
-    encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
+    issue_purpose_token(
+        user_id,
+        secret,
+        RESTORE_AUDIENCE,
+        RESTORE_TOKEN_PURPOSE,
+        RESTORE_TOKEN_TTL_MINUTES,
     )
-    .map_err(|e| AppError::internal_from("jwt encode failed", e))
 }
 
-pub fn verify_restore_token(token: &str, secret: &str) -> Result<MfaClaims, AppError> {
-    let claims = decode::<MfaClaims>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &validation_for(RESTORE_AUDIENCE),
-    )
-    .map(|data| data.claims)
-    .map_err(|_| AppError::Unauthorized)?;
-
-    if claims.purpose != RESTORE_TOKEN_PURPOSE {
-        return Err(AppError::Unauthorized);
-    }
-
-    Ok(claims)
+/// checks a token from [`issue_restore_token`]
+///
+/// # Errors
+///
+/// Returns [`AppError::Unauthorized`] for any token that does not verify.
+pub fn verify_restore_token(token: &str, secret: &str) -> Result<PurposeClaims, AppError> {
+    verify_purpose_token(token, secret, RESTORE_AUDIENCE, RESTORE_TOKEN_PURPOSE)
 }
 
 #[cfg(test)]
@@ -194,6 +261,11 @@ mod tests {
     }
 
     #[test]
+    fn an_out_of_range_ttl_is_an_error_not_a_panic() {
+        assert!(issue_access_token("u1", 0, SECRET, i64::MAX).is_err());
+    }
+
+    #[test]
     fn a_token_without_an_audience_is_refused() {
         #[derive(Serialize)]
         struct Old {
@@ -202,7 +274,7 @@ mod tests {
             exp: usize,
             ver: i32,
         }
-        let now = Utc::now().timestamp() as usize;
+        let now = unix_seconds(Utc::now()).unwrap();
         let old = encode(
             &Header::default(),
             &Old {

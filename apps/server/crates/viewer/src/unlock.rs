@@ -68,8 +68,15 @@ impl Unlocker {
         Ok(ok)
     }
 
+    // the map holds only expiry times, so a poisoned lock is still safe to use
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<[u8; 32], Instant>> {
+        self.verified
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn remembers(&self, key: &[u8; 32]) -> bool {
-        let verified = self.verified.lock().unwrap();
+        let verified = self.lock();
         verified
             .get(key)
             .is_some_and(|until| *until > Instant::now())
@@ -77,7 +84,7 @@ impl Unlocker {
 
     fn remember(&self, key: [u8; 32]) {
         let now = Instant::now();
-        let mut verified = self.verified.lock().unwrap();
+        let mut verified = self.lock();
         if verified.len() >= MAX_REMEMBERED {
             verified.retain(|_, until| *until > now);
             self.limiter.retain_recent();

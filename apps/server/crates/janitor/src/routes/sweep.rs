@@ -53,7 +53,11 @@ pub async fn sweep(state: web::Data<AppState>, auth: BearerAuth) -> HttpResponse
             Err(e) => tracing::error!(error = %e, "sweep aborted"),
         }
     });
-    *slot.sweep_task.lock().unwrap() = Some(task);
+    // the slot only holds a handle, so a poisoned lock is still safe to use
+    *slot
+        .sweep_task
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
 
     HttpResponse::Accepted().json(serde_json::json!({ "status": "sweep started" }))
 }

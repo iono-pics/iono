@@ -53,13 +53,12 @@ pub fn cache_control(
         return CacheControl(vec![CacheDirective::NoStore]);
     }
 
-    let cap = expires_at
-        .map(|expires| {
-            (expires - Utc::now())
-                .num_seconds()
-                .clamp(0, ages.edge as i64) as u32
-        })
-        .unwrap_or(ages.edge);
+    let cap = expires_at.map_or(ages.edge, |expires| {
+        let left = (expires - Utc::now())
+            .num_seconds()
+            .clamp(0, i64::from(ages.edge));
+        u32::try_from(left).unwrap_or(ages.edge)
+    });
 
     CacheControl(vec![
         CacheDirective::Public,

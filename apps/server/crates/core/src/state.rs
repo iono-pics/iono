@@ -2,6 +2,7 @@ use secrecy::SecretString;
 use sqlx::PgPool;
 use std::sync::Arc;
 
+use crate::bootstrap::fatal;
 use crate::config::Config;
 use crate::db;
 use crate::storage::{self, Storage};
@@ -17,12 +18,15 @@ impl CoreState {
     pub async fn build(config: &Config) -> Self {
         let storage = storage::build(config)
             .await
-            .expect("failed to initialize storage backend");
+            .unwrap_or_else(|e| fatal("initialize the storage backend", &e));
         let db = db::build(config)
             .await
-            .expect("failed to connect to database");
+            .unwrap_or_else(|e| fatal("connect to the database", &e));
+        let keyring = config
+            .keyring()
+            .unwrap_or_else(|e| fatal("build the encryption keyring", &e));
         Self {
-            keyring: config.keyring(),
+            keyring,
             storage,
             db,
             config: config.clone(),

@@ -28,6 +28,9 @@ pub(crate) const SNIFF_BYTES: usize = 8192;
 // one request through the edge is at most a few hundred MB
 const RESERVATION_TTL: Duration = Duration::hours(1);
 const MAX_TEXT_FIELD_BYTES: usize = 8192;
+const MAX_FORM_FIELDS: usize = 8;
+// longest the client may go without sending the next chunk
+const BODY_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const CHANNEL_DEPTH: usize = 4;
 const PUMP_CHUNK: usize = 256 * 1024;
 
@@ -87,7 +90,12 @@ pub async fn upload_file(
     let mut plain_password: Option<String> = None;
     let mut uploaded: Option<Uploaded> = None;
 
-    while let Some(field) = payload.try_next().await.map_err(malformed_body)? {
+    let mut field_count = 0usize;
+    while let Some(field) = within_idle_timeout(payload.try_next()).await? {
+        field_count += 1;
+        if field_count > MAX_FORM_FIELDS {
+            return Err(AppError::BadRequest("too many form fields".into()).into());
+        }
         match field.name() {
             Some("password") => {
                 let text = read_text_field(field).await?;
@@ -395,11 +403,11 @@ async fn store_field(
             let Some(reading) = field.as_mut() else {
                 break true;
             };
-            match reading.try_next().await {
+            match within_idle_timeout(reading.try_next()).await {
                 Ok(Some(chunk)) => chunk,
                 Ok(None) => break true,
                 Err(e) => {
-                    let _ = tx.send(Err(malformed_body(e))).await;
+                    let _ = tx.send(Err(e)).await;
                     break false;
                 }
             }
@@ -459,7 +467,7 @@ async fn fill(buf: &mut Vec<u8>, field: &mut Option<Field>, target: usize) -> Re
         let Some(reading) = field.as_mut() else {
             return Ok(());
         };
-        match reading.try_next().await.map_err(malformed_body)? {
+        match within_idle_timeout(reading.try_next()).await? {
             Some(chunk) => buf.extend_from_slice(&chunk),
             None => {
                 *field = None;
@@ -472,7 +480,7 @@ async fn fill(buf: &mut Vec<u8>, field: &mut Option<Field>, target: usize) -> Re
 
 async fn read_text_field(mut field: Field) -> Result<String, AppError> {
     let mut buf = Vec::new();
-    while let Some(chunk) = field.try_next().await.map_err(malformed_body)? {
+    while let Some(chunk) = within_idle_timeout(field.try_next()).await? {
         if buf.len() + chunk.len() > MAX_TEXT_FIELD_BYTES {
             return Err(AppError::BadRequest("form field is too long".into()));
         }
@@ -482,8 +490,18 @@ async fn read_text_field(mut field: Field) -> Result<String, AppError> {
 }
 
 async fn drain_field(mut field: Field) -> Result<(), AppError> {
-    while field.try_next().await.map_err(malformed_body)?.is_some() {}
+    while within_idle_timeout(field.try_next()).await?.is_some() {}
     Ok(())
+}
+
+/// awaits the next piece of the request body, failing when the client stalls
+async fn within_idle_timeout<T>(
+    next: impl std::future::Future<Output = Result<T, actix_multipart::MultipartError>>,
+) -> Result<T, AppError> {
+    match tokio::time::timeout(BODY_IDLE_TIMEOUT, next).await {
+        Ok(result) => result.map_err(malformed_body),
+        Err(_) => Err(AppError::BadRequest("upload stalled".into())),
+    }
 }
 
 fn declared_length(req: &HttpRequest) -> Option<u64> {
@@ -519,7 +537,8 @@ mod tests {
     impl Fixture {
         async fn new(plan: &str) -> Self {
             dotenvy::from_path("../../../.env").ok();
-            let state = web::Data::new(CoreState::build(&Config::from_env()).await);
+            let state =
+                web::Data::new(CoreState::build(&Config::from_env().expect("test config")).await);
 
             let user_id = Uuid::new_v4().to_string();
             let api_token = token::generate_api_token();
