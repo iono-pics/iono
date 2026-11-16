@@ -12,7 +12,7 @@ const STEP_SECONDS: u64 = 30;
 /// a six digit code with a step of drift either side is about a 1 in 333k
 /// guess, so this keeps a stolen password from turning into a login
 const MAX_FAILURES: i16 = 5;
-const LOCKOUT_MINUTES: i64 = 15;
+const LOCKOUT_MINUTES: i32 = 15;
 const SEALED_PREFIX: &str = "sealed";
 
 pub struct TotpSetup {
@@ -146,7 +146,7 @@ pub async fn record_failure(db: &PgPool, user_id: &str) -> AppResult<()> {
     )
     .bind(user_id)
     .bind(MAX_FAILURES)
-    .bind(LOCKOUT_MINUTES as i32)
+    .bind(LOCKOUT_MINUTES)
     .execute(db)
     .await?;
     Ok(())

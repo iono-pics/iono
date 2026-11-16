@@ -439,25 +439,26 @@ impl Opener {
             if self.pending.len() - at < need {
                 break;
             }
-            let body_end = at + need - TAG_LEN;
-            let mut segment = self.pending[at..body_end].to_vec();
-            let tag: [u8; TAG_LEN] = self.pending[body_end..at + need]
+            let start = at;
+            let body_end = start + need - TAG_LEN;
+            let tag: [u8; TAG_LEN] = self.pending[body_end..start + need]
                 .try_into()
                 .map_err(|_| AppError::internal("segment tag is the wrong length"))?;
             self.cipher
                 .decrypt_in_place_detached(
                     &Nonce::from(segment_nonce(self.next, self.next == self.last)),
                     b"",
-                    &mut segment,
+                    &mut self.pending[start..body_end],
                     &Tag::from(tag),
                 )
                 .map_err(|_| AppError::internal("stored object failed authentication"))?;
             at += need;
             self.next += 1;
 
-            let from = std::mem::take(&mut self.skip).min(segment.len());
-            let upto = (from as u64 + self.remaining).min(segment.len() as u64) as usize;
-            out.extend_from_slice(&segment[from..upto]);
+            let segment_len = body_end - start;
+            let from = std::mem::take(&mut self.skip).min(segment_len);
+            let upto = (from as u64 + self.remaining).min(segment_len as u64) as usize;
+            out.extend_from_slice(&self.pending[start + from..start + upto]);
             self.remaining -= (upto - from) as u64;
         }
         self.pending.drain(..at);
@@ -691,6 +692,32 @@ mod tests {
         a.swap_with_slice(&mut b[..SEALED_SEGMENT_LEN]);
         let len = plain.len() as u64;
         assert!(open_range(&key, &sealed, len, 0, len - 1).is_err());
+    }
+
+    #[test]
+    fn opening_does_not_depend_on_how_the_sealed_bytes_arrive() {
+        let key = random_key();
+        let plain = sample(SEGMENT_LEN + 100);
+        let sealed = seal_all(&key, &plain, 4096);
+        let len = plain.len() as u64;
+        let range = sealed_range(len, 10, len - 1).unwrap();
+        let slice = &sealed[range.sealed_start as usize..=range.sealed_end_inclusive as usize];
+
+        for chunk in [
+            1usize,
+            17,
+            SEALED_SEGMENT_LEN - 1,
+            SEALED_SEGMENT_LEN,
+            slice.len(),
+        ] {
+            let mut opener = Opener::new(&key, len, &range);
+            let mut out = Vec::new();
+            for piece in slice.chunks(chunk) {
+                out.extend(opener.push(piece).unwrap());
+            }
+            opener.finish().unwrap();
+            assert_eq!(out, plain[10..], "chunk {chunk}");
+        }
     }
 
     #[test]
